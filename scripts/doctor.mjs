@@ -160,6 +160,71 @@ if (foundConfig) {
   }
 }
 
+// --- MCP configuration ------------------------------------------------------------
+section("MCP configuration")
+{
+  const configured = new Map() // name -> {transport, detail, source}
+  let mcpPolicyServers = {}
+  try {
+    const policySrc = parseJsonc(readFileSync(path.join(ROOT, "policy", "policy.jsonc"), "utf8"))
+    for (const [name, s] of Object.entries(policySrc.mcp?.servers ?? {})) mcpPolicyServers[name] = s.trust
+  } catch {}
+
+  const configPaths = [
+    ...scopes.map(([name, dir]) => [name, path.join(dir, "opencode.jsonc")]),
+    ["project-root", path.join(process.cwd(), "opencode.json")],
+    ["project-root", path.join(process.cwd(), "opencode.jsonc")],
+  ]
+  const seenPaths = new Set()
+  for (const [, cfgPath] of configPaths) {
+    if (!cfgPath || !existsSync(cfgPath) || seenPaths.has(cfgPath)) continue
+    seenPaths.add(cfgPath)
+    try {
+      const cfg = parseJsonc(readFileSync(cfgPath, "utf8"))
+      for (const [name, s] of Object.entries(cfg.mcp?.servers ?? {})) {
+        if (!configured.has(name)) {
+          configured.set(name, {
+            transport: s.type ?? "unknown",
+            detail: Array.isArray(s.command) ? s.command.join(" ") : typeof s.url === "string" ? s.url : "",
+            source: cfgPath,
+          })
+        }
+      }
+    } catch {}
+  }
+
+  // Orphaned rules: permissions naming <server>_<tool> where the server is
+  // configured nowhere. Native actions containing underscores are excluded.
+  const NATIVE_ACTIONS = new Set(["external_directory", "doom_loop"])
+  const orphans = new Set()
+  for (const cfgPath of seenPaths) {
+    try {
+      const cfg = parseJsonc(readFileSync(cfgPath, "utf8"))
+      for (const r of cfg.permissions ?? []) {
+        const a = String(r.action ?? "")
+        if (NATIVE_ACTIONS.has(a)) continue
+        const under = a.indexOf("_")
+        if (under > 0 && !NATIVE_ACTIONS.has(a)) {
+          const srv = a.slice(0, under)
+          if (!configured.has(srv)) orphans.add(`${srv} (rule action "${a}")`)
+        }
+      }
+    } catch {}
+  }
+
+  if (configured.size === 0) {
+    console.log("           no MCP servers configured in scanned scopes (nothing to report)")
+  } else {
+    ok(`MCP servers configured: ${configured.size}`)
+    for (const [name, info] of configured) {
+      const trust = mcpPolicyServers[name] ?? "unlisted-server"
+      console.log(`           - ${name} [${info.transport}] trust=${trust}${trust === "unlisted-server" ? "  <-- not in policy; conservative defaults apply" : ""}`)
+      if (info.detail) console.log(`             ${info.detail}`)
+    }
+  }
+  if (orphans.size) warn(`orphaned MCP permission rules reference servers that are not configured: ${[...orphans].join("; ")}`)
+}
+
 // --- live log check --------------------------------------------------------------------
 if (live) {
   section("Live log scan (~/.local/share/opencode/log)")

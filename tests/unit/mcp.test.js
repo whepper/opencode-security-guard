@@ -127,9 +127,62 @@ test("isMcpAction matches configured inventory", () => {
   assert.equal(isMcpAction(P2, "read", []), false)
 })
 
+test("inventory-independent fallback: underscored non-native actions are MCP-ish", () => {
+  // Regression: with an EMPTY trust map and failed mcp.list() discovery,
+  // unlisted MCP tools must still be classified (v0.2 live-demo finding).
+  const Pempty = JSON.parse(JSON.stringify(P))
+  assert.equal(isMcpAction(Pempty, "dummy_get_note", []), true)
+  assert.equal(isMcpAction(Pempty, "web_search_prime", []), true)
+  for (const native of ["bash", "read", "grep", "webfetch", "external_directory", "execute"]) {
+    assert.equal(isMcpAction(Pempty, native, []), false, `${native} must stay native`)
+  }
+  // And the full decision path enforces the unlisted-server ask:
+  const v = decideMcpCall(Pempty, "dummy_get_note", {}, [])
+  assert.equal(v?.decision, "ask")
+})
+
 test("diagnostics include server/tool context and never values", () => {
   const v = decideMcpCall(P2, "dummy_read_file", { file: ".env" }, KNOWN)
   const msg = formatVerdict(v)
   assert.ok(msg.includes("dummy/read_file"))
   assert.ok(!msg.includes("FAKE"))
+})
+
+// ---------------------------------------------------------------------------
+// Provenance experiment (opt-in; policy.mcp.provenance.enabled)
+// ---------------------------------------------------------------------------
+
+import { createProvenanceStore, provenanceScan } from "../../plugin/security-guard.js"
+
+test("provenance store: marked results are detected in later arguments", () => {
+  const store = createProvenanceStore()
+  const content = "DUMMY_TOKEN=FAKE-NOT-A-REAL-SECRET-abc123 and some padding text to pass the minimum length check"
+  assert.equal(store.markSensitive(content), "PROV-001")
+  const hit = provenanceScan(store, { text: `here is what I read: ${content}` })
+  assert.equal(hit?.decision, "block")
+  assert.equal(hit.ruleId, "MCP-PROV-001")
+})
+
+test("provenance store: short/absent markers do not trip", () => {
+  const store = createProvenanceStore()
+  store.markSensitive("short")
+  assert.equal(provenanceScan(store, { text: "short" }), null) // below minSnippet
+  assert.equal(provenanceScan(store, {}), null)
+  assert.equal(provenanceScan(null, { a: "x" }), null) // disabled store
+})
+
+test("provenance store: FIFO cap bounds memory", () => {
+  const store = createProvenanceStore({ maxEntries: 3 })
+  for (let i = 0; i < 5; i++) {
+    store.markSensitive(`marker number ${i} with enough padding to satisfy the minimum length requirement`)
+  }
+  assert.equal(store.size(), 3)
+})
+
+test("provenance honesty: re-encoded or paraphrased relay evades detection", () => {
+  const store = createProvenanceStore()
+  const original = "secret-value-payload-with-enough-length-to-be-marked-as-sensitive-content"
+  store.markSensitive(original)
+  assert.equal(provenanceScan(store, { text: Buffer.from("unrelated").toString("base64") }), null)
+  assert.equal(provenanceScan(store, { text: "a paraphrase that shares no literal substring with the original" }), null)
 })

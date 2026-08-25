@@ -1220,13 +1220,24 @@ export function decideMcpCall(policy, toolName, input, knownServers = [], opts =
   return verdict
 }
 
-/** True when an action/tool name plausibly belongs to a configured/known MCP
- *  server (used by the permission-evaluate channel where inputs are absent). */
+/** True when an action/tool name plausibly belongs to an MCP server.
+ *  Primary signal: configured/known server prefix. Fallback (when inventory
+ *  discovery fails): any underscored name that is not a known NATIVE tool —
+ *  conservative because native tool names are a small fixed set. */
+export const NATIVE_TOOL_NAMES = new Set([
+  "read", "edit", "write", "patch", "multiedit", "glob", "grep", "grep_fast",
+  "webfetch", "websearch", "subagent", "task", "skill", "question",
+  "todo_write", "todowrite", "todo_read", "todoread", "notebookedit",
+  "bash", "shell", "command", "execute", "terminal", "list", "view",
+  "external_directory", "doom_loop", "lsp",
+])
+
 export function isMcpAction(policy, action, knownServers = []) {
   const servers = new Set([...(knownServers ?? []), ...Object.keys(policy.mcp?.servers ?? {})])
   const a = String(action ?? "")
   for (const s of servers) if (s && a.startsWith(s + "_")) return true
-  return false
+  // Inventory-independent fallback: underscored, not native, not bare.
+  return a.includes("_") && !NATIVE_TOOL_NAMES.has(a)
 }
 
 // ============================================================================
@@ -1350,6 +1361,79 @@ export function formatVerdict(v) {
 }
 
 // ============================================================================
+// Pure engine — experimental cross-tool provenance (opt-in, OFF by default)
+// ============================================================================
+
+/**
+ * Session-scoped marker store for the CLEAN/SENSITIVE/UNKNOWN model:
+ *   - markSensitive(text): called when a tool result originates from an
+ *     approval-gated/local-data source (its content is potentially secret).
+ *   - findSensitive(value): returns true when a later argument embeds a
+ *     previously observed sensitive snippet (exact substring, minimum length).
+ *
+ * Honest limits (docs/mcp.md): paraphrase, re-encoding, summarization,
+ * chunking, and partial overlaps evade this completely. It is a tripwire,
+ * NOT data-flow security.
+ */
+export function createProvenanceStore(opts = {}) {
+  const maxEntries = opts.maxEntries ?? 48
+  const minSnippet = opts.minSnippet ?? 32
+  const snippets = [] // FIFO of {id, text}
+  let counter = 0
+
+  const normalize = (s) => String(s ?? "").replace(/\s+/g, " ").trim()
+
+  return {
+    markSensitive(text) {
+      const t = normalize(text)
+      if (t.length < minSnippet) return null
+      const id = `PROV-${String(++counter).padStart(3, "0")}`
+      // Store the head window; long outputs are still detectable by their
+      // distinctive prefix, and storage stays bounded.
+      snippets.push({ id, text: t.slice(0, 240) })
+      if (snippets.length > maxEntries) snippets.shift()
+      return id
+    },
+    findSensitive(value) {
+      if (snippets.length === 0) return null
+      const v = normalize(value)
+      if (v.length < minSnippet) return null
+      for (const s of snippets) {
+        if (v.includes(s.text)) return { id: s.id }
+      }
+      return null
+    },
+    size() {
+      return snippets.length
+    },
+  }
+}
+
+/** Scan all string values inside a tool-input object for marked content. */
+export function provenanceScan(store, input) {
+  if (!store) return null
+  const strings = []
+  const collect = (v, key) => {
+    if (typeof v === "string") strings.push([key, v])
+    else if (v && typeof v === "object") for (const [k2, v2] of Object.entries(v)) collect(v2, key ? `${key}.${k2}` : k2)
+  }
+  for (const [k, v] of Object.entries(input ?? {})) collect(v, k)
+  for (const [, value] of strings) {
+    const hit = store.findSensitive(value)
+    if (hit) {
+      return {
+        decision: "block",
+        ruleId: "MCP-PROV-001",
+        category: "mcp-provenance",
+        reason: "argument embeds content previously returned by an approval-gated source (experimental provenance tripwire)",
+        matched: hit.id,
+      }
+    }
+  }
+  return null
+}
+
+// ============================================================================
 // OpenCode V2 adapter
 // ============================================================================
 
@@ -1411,16 +1495,34 @@ export default {
       knownServers = [...new Set([...knownServers, ...names.map(String)])]
     } catch {}
 
+    // Experimental cross-tool provenance (policy-gated, default OFF).
+    const prov = policy.mcp?.provenance?.enabled === true ? createProvenanceStore() : null
+    const pendingSensitive = new Map() // callID -> true (result should be marked)
+
     await ctx.tool.hook("execute.before", (event) => {
+      const callID = clip(event.callID)
       // MCP calls first: namespaced `${server}_${tool}` names never collide
       // with native tool names. Deny-class verdicts hard-block here (the
       // Code-Mode wrapper flattens messages, so blocking must not depend on
       // message propagation); approval-tier verdicts are enforced by the
       // permission channel, which fires per nested call and CAN prompt.
       const mcpVerdict = decideMcpCall(policy, event.tool, event.input ?? {}, knownServers)
-      if (mcpVerdict && mcpVerdict.decision === "block") {
-        writeHeartbeat({ phase: "running", lastDecision: mcpVerdict.ruleId })
-        throw new Error(formatVerdict(mcpVerdict))
+      if (prov) {
+        const scanHit = provenanceScan(prov, event.input ?? {})
+        if (scanHit) {
+          writeHeartbeat({ phase: "running", lastDecision: scanHit.ruleId })
+          throw new Error(formatVerdict(scanHit))
+        }
+      }
+      if (mcpVerdict) {
+        if (prov && mcpVerdict.decision !== "block" && callID) {
+          // Approved/allowed local-data reads become provenance sources.
+          pendingSensitive.set(callID, true)
+        }
+        if (mcpVerdict.decision === "block") {
+          writeHeartbeat({ phase: "running", lastDecision: mcpVerdict.ruleId })
+          throw new Error(formatVerdict(mcpVerdict))
+        }
       }
 
       const norm = normalizeToolCall(event.tool, event.input ?? {})
@@ -1437,7 +1539,26 @@ export default {
         writeHeartbeat({ phase: "running", lastDecision: v.ruleId })
         throw new Error(formatVerdict({ ...v, decision: "block" }))
       }
+      // Provenance sources: any approval-gated call whose result will flow
+      // (native read/edit asks; MCP asks already marked above).
+      if (prov && v && v.decision === "ask" && callID) {
+        pendingSensitive.set(callID, true)
+      }
     })
+
+    if (prov) {
+      try {
+        await ctx.tool.hook("execute.after", (event) => {
+          const callID = clip(event.callID)
+          if (!callID || !pendingSensitive.has(callID)) return
+          pendingSensitive.delete(callID)
+          const text =
+            event.result?.content?.map?.((c) => c?.text ?? "").join("\n") ??
+            (typeof event.output === "string" ? event.output : "")
+          if (text) prov.markSensitive(text.slice(0, 2000))
+        })
+      } catch {}
+    }
 
     await ctx.permission.hook("evaluate", (event) => {
       // MCP channel: arguments are not present here, so trust/class defaults
