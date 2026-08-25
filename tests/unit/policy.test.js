@@ -98,3 +98,39 @@ test("watcher ignore list is non-empty standard globs", () => {
     assert.ok(w.length > 1)
   }
 })
+
+// ---------------------------------------------------------------------------
+// MCP policy section (Layer 4b)
+// ---------------------------------------------------------------------------
+
+test("mcp defaults table is complete and uses valid effects", () => {
+  const classes = ["read-only", "local-data", "external-write", "network", "credential-related", "destructive", "unknown"]
+  for (const [trust, row] of Object.entries(policy.mcp.defaults)) {
+    for (const cls of classes) {
+      assert.ok(["allow", "ask", "deny"].includes(row[cls]), `${trust}.${cls} missing/invalid`)
+    }
+  }
+  // blocked server must deny everything — no decorative trust level
+  for (const [cls, eff] of Object.entries(policy.mcp.defaults.blocked)) {
+    assert.equal(eff, "deny", `blocked.${cls} must deny`)
+  }
+})
+
+test("mcp explicit tool rules carry ids/rationales and valid effects", () => {
+  for (const t of policy.mcp.tools ?? []) {
+    assert.ok(t.id && t.id.startsWith("MCP-"), `bad id ${t.id}`)
+    assert.ok(t.server && t.tool)
+    assert.ok(["allow", "ask", "deny"].includes(t.effect))
+    assert.ok(t.reason && t.reason.length > 10)
+    assert.ok(["read-only", "local-data", "external-write", "network", "credential-related", "destructive", "unknown"].includes(t.class))
+  }
+})
+
+test("blocked/untrusted server declarations require a reason", () => {
+  for (const [name, s] of Object.entries(policy.mcp.servers ?? {})) {
+    if (["blocked", "untrusted"].includes(s.trust)) {
+      assert.ok(s.reason && s.reason.length > 5, `${name}: ${s.trust} requires a rationale`)
+    }
+    assert.ok(["trusted", "restricted", "untrusted", "blocked"].includes(s.trust), `${name}: unknown trust ${s.trust}`)
+  }
+})

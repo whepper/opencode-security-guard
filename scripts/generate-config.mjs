@@ -37,14 +37,30 @@ function parseArgs(argv) {
   return args
 }
 
-/** Apply a profile's Layer-1 overrides to the ordered permission rules. */
+/** Apply a profile's Layer-1 overrides to the ordered permission rules.
+ *  Explicit MCP tool DENIES are mirrored as native rules (belt-and-braces:
+ *  native denies survive saved approvals and run even if the plugin is
+ *  absent) inserted BEFORE the safe-exceptions section. */
 function resolvePermissions(policy, profileName) {
   const profile = policy.profiles[profileName]
   const overrides = profile?.overrides ?? {}
-  return policy.permissions.map((rule) => {
+  const fsRules = policy.permissions.map((rule) => {
     const effect = overrides[rule.id] ?? rule.effect
     return { id: rule.id, action: rule.action, resource: rule.resource, effect, reason: rule.reason }
   })
+  const firstExcIdx = fsRules.findIndex((r) => r.id.startsWith("SG-EXC"))
+  const exc = fsRules.filter((r) => r.id.startsWith("SG-EXC"))
+  const head = firstExcIdx === -1 ? fsRules : fsRules.slice(0, firstExcIdx)
+  const mcpNative = (policy.mcp?.tools ?? [])
+    .filter((t) => t.effect === "deny")
+    .map((t) => ({
+      id: `${t.id}-NATIVE`,
+      action: `${t.server}_${t.tool}`,
+      resource: "*",
+      effect: "deny",
+      reason: `native mirror of ${t.id} (runs even without the guard plugin): ${t.reason}`,
+    }))
+  return [...head, ...mcpNative, ...exc]
 }
 
 /** Emit opencode.jsonc text. Rule IDs/reasons become comments (the V2 schema
@@ -113,6 +129,7 @@ function renderGuardBlob(policy, profileName) {
     exceptionPaths: g.exceptionPaths,
     promoteAskToDenyIds: strict.promoteAskToDenyIds ?? [],
     envVarNamePattern: g.envVarNamePattern,
+    mcp: policy.mcp ?? {},
   }
   return `${BEGIN}
 // Compiled from policy/policy.jsonc — EDIT THE POLICY, NOT THIS BLOCK.

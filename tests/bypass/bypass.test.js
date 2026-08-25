@@ -14,7 +14,7 @@ import { readFileSync } from "node:fs"
 import { fileURLToPath } from "node:url"
 import path from "node:path"
 import { parseJsonc } from "../../scripts/jsonc.mjs"
-import { decideToolCall, GENERATED_GUARD_POLICY } from "../../plugin/security-guard.js"
+import { decideToolCall, decideMcpCall, GENERATED_GUARD_POLICY } from "../../plugin/security-guard.js"
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..")
 const { cases } = parseJsonc(readFileSync(path.join(ROOT, "tests/bypass/cases.jsonc"), "utf8"))
@@ -74,4 +74,43 @@ test("corpus balance: positives and negatives both present", () => {
   assert.ok(cases.some((c) => c.expect === "block"))
   assert.ok(cases.some((c) => c.expect === "ask"))
   assert.ok(cases.filter((c) => c.expect === null).length >= 10, "need a real negative set")
+})
+
+// ---------------------------------------------------------------------------
+// MCP corpus (tests/bypass/mcp-cases.jsonc) — same runner contract, driven
+// through decideMcpCall with the synthetic server inventory declared in the
+// corpus file. parseJsonc / decideMcpCall / GENERATED_GUARD_POLICY come from
+// the existing top-level imports.
+// ---------------------------------------------------------------------------
+const mcpCorpus = parseJsonc(readFileSync(path.join(ROOT, "tests/bypass/mcp-cases.jsonc"), "utf8"))
+const PM = JSON.parse(JSON.stringify(GENERATED_GUARD_POLICY))
+PM.mcp.servers = mcpCorpus.serverTrust
+for (const t of mcpCorpus.tools ?? []) (PM.mcp.tools ??= []).push(t)
+const MCP_KNOWN = mcpCorpus.knownServers
+
+for (const c of mcpCorpus.cases) {
+  test(`mcp corpus ${c.id} (${c.category})`, () => {
+    const v = decideMcpCall(PM, c.tool, c.input ?? {}, MCP_KNOWN)
+    const verdict = v ? v.decision : null
+    assert.equal(
+      verdict,
+      c.expect,
+      `${c.id}: expected ${JSON.stringify(c.expect)} for [${c.tool}] got ${JSON.stringify(verdict)} ${v ? `(${v.ruleId})` : ""}`
+    )
+    if ((c.expect === "block" || c.expect === "ask") && v) {
+      assert.ok(v.ruleId, `${c.id}: verdict must carry a rule ID`)
+      assert.ok(!JSON.stringify(v).includes("FAKE-NOT-A-REAL-SECRET"), `${c.id}: diagnostics must not echo argument values`)
+    }
+  })
+}
+
+test("mcp corpus sanity: unique ids, required categories present", () => {
+  const seen = new Set()
+  for (const c of mcpCorpus.cases) {
+    assert.ok(c.id && !seen.has(c.id), `duplicate id ${c.id}`)
+    seen.add(c.id)
+  }
+  for (const cat of ["local-secret-access", "external-write", "chaining", "prompt-injection", "legitimate"]) {
+    assert.ok(mcpCorpus.cases.some((c) => c.category === cat), `missing category ${cat}`)
+  }
 })

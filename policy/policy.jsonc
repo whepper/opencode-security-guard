@@ -220,6 +220,88 @@
   ],
 
   // ---------------------------------------------------------------------------
+  // LAYER 4b — MCP connector policy (compiled into the plugin; explicit denies
+  // are additionally emitted as native Layer-1 rules keyed `<server>_<tool>`).
+  //
+  // Verified runtime facts (docs/verification-log.md, 2026-08-26):
+  //   * MCP tools surface as actions/tools named `${server}_${tool}`
+  //     (underscores normalized); arguments are visible to tool hooks;
+  //   * permission.evaluate fires per MCP call with resources ["*"];
+  //   * throwing in execute.before blocks an allowed call mechanically;
+  //   * results are visible to execute.after;
+  //   * MCP tools are exposed to the model only via the Code-Mode `execute`
+  //     dispatcher, which composes all of the above per nested call.
+  //
+  // Trust is a POLICY statement about a server, never derived from transport:
+  // a local stdio wrapper can proxy a remote service and vice versa.
+  // ---------------------------------------------------------------------------
+  "mcp": {
+    "policyVersion": 1,
+
+    // Server trust statements drive DEFAULTS for their tools. Every
+    // blocked/untrusted entry must carry a reason. Absent server => falls to
+    // defaults.unlisted-server (fail-conservative).
+    // Example (commented):
+    // "servers": {
+    //   "github":       { "trust": "restricted", "reason": "external side effects possible" },
+    //   "random-scraper": { "trust": "untrusted", "reason": "third-party crawler, unaudited" }
+    // },
+    "servers": {},
+
+    // Explicit per-tool overrides win over classes and trust defaults.
+    // class ∈ read-only | local-data | external-write | network | credential-related | destructive | unknown
+    // Example (commented):
+    // "tools": [
+    //   { "id": "MCP-GH-001", "server": "github", "tool": "create_issue",
+    //     "class": "external-write", "effect": "ask",
+    //     "reason": "publishes arbitrary model-supplied content externally" },
+    //   { "id": "MCP-DENY-001", "server": "legacy", "tool": "run_shell",
+    //     "class": "destructive", "effect": "deny",
+    //     "reason": "unaudited arbitrary command execution" }
+    // ],
+    "tools": [],
+
+    // Name-derived classification for tools WITHOUT an explicit entry.
+    // Token-based (split on _, -, camelCase) to respect false-positive
+    // discipline: "tokenize_dataset" is NOT credential-related merely for
+    // containing "token".
+    "verbClasses": {
+      "external-write": ["send", "post", "create", "write", "upload", "publish", "delete", "destroy", "remove", "update", "deploy", "invite", "email", "submit", "push", "modify"],
+      "read-only": ["get", "list", "read", "search", "describe", "view", "find"],
+      "credential-related": ["auth", "login", "token", "credential", "secret", "password", "apikey"],
+      "destructive": ["delete", "destroy", "drop", "wipe", "purge"],
+      // Ambiguous verbs cannot be classified -> fall to the trust default
+      // for "unknown" rather than guessing.
+      "ambiguous": ["fetch", "query", "run", "exec", "invoke", "call", "apply", "sync"]
+    },
+
+    // Effect defaults per (trust × class). These are ENFORCED effects, not
+    // decoration: the guard applies them via permission-evaluate escalation
+    // and hard blocks for denies.
+    "defaults": {
+      "trusted":         { "read-only": "allow", "local-data": "ask",  "external-write": "ask",  "network": "allow", "credential-related": "ask",  "destructive": "deny",  "unknown": "ask" },
+      "restricted":      { "read-only": "allow", "local-data": "ask",  "external-write": "ask",  "network": "ask",   "credential-related": "ask",  "destructive": "deny",  "unknown": "ask" },
+      "untrusted":       { "read-only": "ask",   "local-data": "deny", "external-write": "deny", "network": "deny",  "credential-related": "deny", "destructive": "deny",  "unknown": "ask" },
+      "blocked":         { "read-only": "deny",  "local-data": "deny", "external-write": "deny", "network": "deny",  "credential-related": "deny", "destructive": "deny",  "unknown": "deny" },
+      "unlisted-server": { "read-only": "ask",   "local-data": "ask",  "external-write": "ask",  "network": "ask",   "credential-related": "ask",  "destructive": "deny",  "unknown": "ask" }
+    },
+
+    // Argument-level rules run where arguments are visible (guard tool hook).
+    // "ask" here downgrades to BLOCK with an approval-pointing message: the
+    // argument layer has no prompt channel (same trade-off as grep/glob in
+    // v0.1, documented in docs/limitations.md).
+    "argRules": [
+      { "id": "MCP-ARG-PATH-001", "match": "protected-path", "onTier": "deny", "effect": "block", "reason": "argument references high-confidence secret material" },
+      { "id": "MCP-ARG-PATH-002", "match": "protected-path", "onTier": "ask",  "effect": "block", "reason": "argument references approval-gated material; allowlist deliberately if legitimate" },
+      { "id": "MCP-ARG-SEC-003",  "match": "secret-var-name", "effect": "block", "reason": "argument appears to carry a secret-named value; route sanitized substitutes instead" }
+    ],
+
+    // Cross-tool sensitive-data tracking. OFF until (and unless) the P7
+    // experiment proves useful signal; see docs/mcp.md provenance section.
+    "provenance": { "enabled": false }
+  },
+
+  // ---------------------------------------------------------------------------
   // LAYER 2 — watcher exclusions. Reduce accidental discovery/indexing.
   // THESE ARE NOT A SECURITY BOUNDARY. Any tool the agent runs can still read
   // these paths; only OpenCode's file-watcher/indexing skips them.

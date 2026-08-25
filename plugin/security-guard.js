@@ -281,7 +281,139 @@ export const GENERATED_GUARD_POLICY = Object.freeze({
     }
   ],
   "promoteAskToDenyIds": [],
-  "envVarNamePattern": "(TOKEN|SECRET|PASSWORD|PASSWD|API_?KEY|PRIVATE_KEY|ACCESS_KEY|CLIENT_SECRET|CREDENTIAL|AUTH_|_AUTH|AUTH$)"
+  "envVarNamePattern": "(TOKEN|SECRET|PASSWORD|PASSWD|API_?KEY|PRIVATE_KEY|ACCESS_KEY|CLIENT_SECRET|CREDENTIAL|AUTH_|_AUTH|AUTH$)",
+  "mcp": {
+    "policyVersion": 1,
+    "servers": {},
+    "tools": [],
+    "verbClasses": {
+      "external-write": [
+        "send",
+        "post",
+        "create",
+        "write",
+        "upload",
+        "publish",
+        "delete",
+        "destroy",
+        "remove",
+        "update",
+        "deploy",
+        "invite",
+        "email",
+        "submit",
+        "push",
+        "modify"
+      ],
+      "read-only": [
+        "get",
+        "list",
+        "read",
+        "search",
+        "describe",
+        "view",
+        "find"
+      ],
+      "credential-related": [
+        "auth",
+        "login",
+        "token",
+        "credential",
+        "secret",
+        "password",
+        "apikey"
+      ],
+      "destructive": [
+        "delete",
+        "destroy",
+        "drop",
+        "wipe",
+        "purge"
+      ],
+      "ambiguous": [
+        "fetch",
+        "query",
+        "run",
+        "exec",
+        "invoke",
+        "call",
+        "apply",
+        "sync"
+      ]
+    },
+    "defaults": {
+      "trusted": {
+        "read-only": "allow",
+        "local-data": "ask",
+        "external-write": "ask",
+        "network": "allow",
+        "credential-related": "ask",
+        "destructive": "deny",
+        "unknown": "ask"
+      },
+      "restricted": {
+        "read-only": "allow",
+        "local-data": "ask",
+        "external-write": "ask",
+        "network": "ask",
+        "credential-related": "ask",
+        "destructive": "deny",
+        "unknown": "ask"
+      },
+      "untrusted": {
+        "read-only": "ask",
+        "local-data": "deny",
+        "external-write": "deny",
+        "network": "deny",
+        "credential-related": "deny",
+        "destructive": "deny",
+        "unknown": "ask"
+      },
+      "blocked": {
+        "read-only": "deny",
+        "local-data": "deny",
+        "external-write": "deny",
+        "network": "deny",
+        "credential-related": "deny",
+        "destructive": "deny",
+        "unknown": "deny"
+      },
+      "unlisted-server": {
+        "read-only": "ask",
+        "local-data": "ask",
+        "external-write": "ask",
+        "network": "ask",
+        "credential-related": "ask",
+        "destructive": "deny",
+        "unknown": "ask"
+      }
+    },
+    "argRules": [
+      {
+        "id": "MCP-ARG-PATH-001",
+        "match": "protected-path",
+        "onTier": "deny",
+        "effect": "block",
+        "reason": "argument references high-confidence secret material"
+      },
+      {
+        "id": "MCP-ARG-PATH-002",
+        "match": "protected-path",
+        "onTier": "ask",
+        "effect": "block",
+        "reason": "argument references approval-gated material; allowlist deliberately if legitimate"
+      },
+      {
+        "id": "MCP-ARG-SEC-003",
+        "match": "secret-var-name",
+        "effect": "block",
+        "reason": "argument appears to carry a secret-named value; route sanitized substitutes instead"
+      }
+    ],
+    "provenance": {
+      "enabled": false
+    }
+  }
 })
 // ==== END GENERATED GUARD POLICY ====
 
@@ -931,6 +1063,173 @@ export function analyzeCommand(policy, command, opts = {}) {
 }
 
 // ============================================================================
+// Pure engine — MCP connector analysis (P0-verified runtime facts)
+// ============================================================================
+
+const MCP_DEFAULT_TRUST = "unlisted-server"
+const MCP_EFFECTS = new Set(["allow", "ask", "deny"])
+
+/**
+ * Split an OpenCode MCP tool/action name `${server}_${tool}`.
+ * Ambiguity (server names containing "_") is resolved against the configured
+ * server inventory (longest prefix wins); unknown prefixes degrade to a
+ * conservative unlisted-server classification.
+ */
+export function parseMcpToolName(toolName, knownServers = []) {
+  const t = String(toolName ?? "")
+  if (!t.includes("_")) return null
+  let best = null
+  for (const s of knownServers) {
+    if (s && t.startsWith(s + "_") && (!best || s.length > best.length)) best = s
+  }
+  if (best) return { server: best, tool: t.slice(best.length + 1) }
+  const i = t.indexOf("_")
+  return { server: t.slice(0, i), tool: t.slice(i + 1), inventoryMatch: false }
+}
+
+function mcpTokens(name) {
+  return String(name)
+    .split(/[_\-\s]|(?<=[a-z0-9])(?=[A-Z])/)
+    .filter(Boolean)
+    .map((t) => t.toLowerCase())
+}
+
+/** Verb-token classification for tools without an explicit entry.
+ *  Write-side wins over read-side when both appear (conservative). */
+export function classifyMcpTool(policyMcp, server, tool) {
+  const explicit = (policyMcp.tools ?? []).find((r) => r.server === server && r.tool === tool)
+  if (explicit) {
+    return { class: explicit.class ?? "unknown", ruleId: explicit.id, reason: explicit.reason, effectOverride: explicit.effect, explicit: true }
+  }
+  const vc = policyMcp.verbClasses ?? {}
+  const has = (verbs) => verbs.some((v) => mcpTokens(tool).includes(v))
+  if (has(vc.destructive ?? [])) return { class: "destructive", ruleId: "MCP-CLS-D-001" }
+  if (has(vc["external-write"] ?? [])) return { class: "external-write", ruleId: "MCP-CLS-W-001" }
+  if (has(vc["credential-related"] ?? [])) return { class: "credential-related", ruleId: "MCP-CLS-C-001" }
+  const writeish = has((vc["external-write"] ?? []).map((v) => v.replace(/e$/, ""))) // stem variants (updates->update handled by tokens anyway)
+  if (has(vc["read-only"] ?? []) && !writeish) {
+    // A read verb alone classifies as read-only UNLESS a write token also
+    // appears anywhere in the name (e.g. get_and_write_report).
+    const allTokens = mcpTokens(tool)
+    if (!(vc["external-write"] ?? []).some((v) => allTokens.includes(v)) && !(vc.destructive ?? []).some((v) => allTokens.includes(v))) {
+      return { class: "read-only", ruleId: "MCP-CLS-R-001" }
+    }
+  }
+  if (has(vc.ambiguous ?? [])) return { class: "unknown", ruleId: "MCP-CLS-U-001", ambiguous: true }
+  return { class: "unknown", ruleId: "MCP-CLS-U-002" }
+}
+
+function mcpEffectFor(policyMcp, server, cls) {
+  const trust = policyMcp.servers?.[server]?.trust ?? MCP_DEFAULT_TRUST
+  const table = policyMcp.defaults?.[trust] ?? policyMcp.defaults?.[MCP_DEFAULT_TRUST] ?? {}
+  return table[cls] ?? "ask"
+}
+
+function mcpTrustReason(policyMcp, server) {
+  const entry = policyMcp.servers?.[server]
+  return entry?.reason ? `${server} (${entry.trust}): ${entry.reason}` : `${server}: server not present in MCP trust policy`
+}
+
+/** Argument-level rules: protected-path tiers reuse the filesystem classifier;
+ *  secret-named values are flagged conservatively. Returns escalations only. */
+export function mcpArgumentVerdicts(policy, input, promote) {
+  const out = []
+  const strings = []
+  const collect = (v, key) => {
+    if (typeof v === "string") strings.push([key, v])
+    else if (v && typeof v === "object") for (const [k2, v2] of Object.entries(v)) collect(v2, key ? `${key}.${k2}` : k2)
+  }
+  for (const [k, v] of Object.entries(input ?? {})) collect(v, k)
+
+  for (const [, value] of strings) {
+    const norm = normalizePathToken(value)
+    if (norm && looksLikePath(norm)) {
+      const cls = classifyPath(policy, norm, { promoteAskToDenyIds: promote })
+      if (cls.tier !== "pass") {
+        out.push({
+          decision: cls.tier === "deny" ? "block" : "block", // arg-layer has no prompt channel
+          ruleId: cls.tier === "deny" ? "MCP-ARG-PATH-001" : "MCP-ARG-PATH-002",
+          category: "mcp-protected-path",
+          reason: (cls.tier === "deny" ? cls.reason : "approval-gated: " + cls.reason),
+          matched: basenameOf(norm),
+          pathRule: cls.ruleId,
+        })
+        continue
+      }
+    }
+    // Secret-named VALUE detection — deliberately narrow to avoid flagging
+    // prose that merely contains words like "secret": either a BARE variable
+    // name, or an explicit KEY=VALUE assignment whose key names a secret.
+    {
+      const tv = String(value).trim()
+      const bareName = !/\s/.test(tv) && tv.length >= 4 && isSecretEnvName(policy, tv)
+      const kv = value.match(/^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(\S.*)$/)
+      if (bareName || (kv && isSecretEnvName(policy, kv[1]))) {
+        out.push({
+          decision: "block",
+          ruleId: "MCP-ARG-SEC-003",
+          category: "mcp-secret-value",
+          reason: "argument appears to carry a secret-named value; route sanitized substitutes instead",
+          matched: "<argument>",
+        })
+      }
+    }
+  }
+  return out
+}
+
+/**
+ * Full MCP decision. Effects:
+ *   deny -> block (hard), ask -> ask, allow -> null (no opinion).
+ * When `withArgs` is false (permission-evaluate channel has no inputs),
+ * argument rules are skipped.
+ */
+export function decideMcpCall(policy, toolName, input, knownServers = [], opts = {}) {
+  const parsed = parseMcpToolName(toolName, knownServers)
+  if (!parsed) return null
+  const { server, tool } = parsed
+  const clsInfo = classifyMcpTool(policy.mcp ?? {}, server, tool)
+  const effect = clsInfo.effectOverride ?? mcpEffectFor(policy.mcp ?? {}, server, clsInfo.class)
+  const reason =
+    clsInfo.reason ??
+    `${clsInfo.class ?? "unknown"} tool on ` + mcpTrustReason(policy.mcp ?? {}, server)
+
+  let verdict = null
+  if (effect === "deny" || effect === "ask") {
+    verdict = {
+      decision: effect === "deny" ? "block" : "ask",
+      ruleId: clsInfo.ruleId ?? "MCP-DEF-001",
+      category: "mcp-policy",
+      reason,
+      matched: tool,
+      server,
+      tool,
+      class: clsInfo.class,
+      explicit: !!clsInfo.explicit,
+    }
+  }
+
+  if (opts.withArgs !== false) {
+    const argHits = mcpArgumentVerdicts(policy, input, opts.promoteAskToDenyIds ?? policy.promoteAskToDenyIds ?? [])
+    // Highest escalation wins; argument evidence always surfaces.
+    if (argHits.length) {
+      const worst = argHits.find((h) => h.decision === "block") ?? argHits[0]
+      return { ...worst, server, tool }
+    }
+  }
+  return verdict
+}
+
+/** True when an action/tool name plausibly belongs to a configured/known MCP
+ *  server (used by the permission-evaluate channel where inputs are absent). */
+export function isMcpAction(policy, action, knownServers = []) {
+  const servers = new Set([...(knownServers ?? []), ...Object.keys(policy.mcp?.servers ?? {})])
+  const a = String(action ?? "")
+  for (const s of servers) if (s && a.startsWith(s + "_")) return true
+  return false
+}
+
+// ============================================================================
 // Normalized tool/action representation + top-level decisions
 // ============================================================================
 
@@ -1041,11 +1340,12 @@ export function decidePermissionEvent(policy, action, resources) {
 export function formatVerdict(v) {
   const scope = v.decision === "block" ? "BLOCKED" : "APPROVAL REQUIRED"
   const via = v.pathRule ? ` [matched rule ${v.pathRule}]` : ""
+  const where = v.server || v.tool ? ` (${v.server}/${v.tool})` : ""
   return (
-    `[${PLUGIN_ID}] ${scope} (${v.ruleId})${via}: ${v.reason}. ` +
+    `[${PLUGIN_ID}] ${scope} (${v.ruleId})${via}${where}: ${v.reason}. ` +
     `Matched: "${v.matched}". ` +
     `This guard reduces risk; it cannot prove absence of exfiltration. ` +
-    `If access is genuinely required, ask the user for a sanitized substitute.`
+    `If access is genuinely required, ask the user for a sanitized substitute or adjust the MCP trust policy.`
   )
 }
 
@@ -1096,7 +1396,33 @@ export default {
     // Heartbeat FIRST so a crash later in setup is still observable.
     writeHeartbeat({ phase: "starting", opencode: ctx?.app?.version, policyVersion: policy.policyVersion })
 
+    // Known MCP servers: policy-declared plus whatever the runtime currently
+    // has registered (best-effort discovery; failure is non-fatal).
+    let knownServers = Object.keys(policy.mcp?.servers ?? {})
+    try {
+      const listed = await ctx.mcp.list()
+      const names = Array.isArray(listed?.servers)
+        ? listed.servers.map((s) => s?.name ?? s?.id).filter(Boolean)
+        : listed instanceof Map
+          ? [...listed.keys()]
+          : Array.isArray(listed)
+            ? listed.map((s) => s?.name ?? s?.id ?? s).filter(Boolean)
+            : []
+      knownServers = [...new Set([...knownServers, ...names.map(String)])]
+    } catch {}
+
     await ctx.tool.hook("execute.before", (event) => {
+      // MCP calls first: namespaced `${server}_${tool}` names never collide
+      // with native tool names. Deny-class verdicts hard-block here (the
+      // Code-Mode wrapper flattens messages, so blocking must not depend on
+      // message propagation); approval-tier verdicts are enforced by the
+      // permission channel, which fires per nested call and CAN prompt.
+      const mcpVerdict = decideMcpCall(policy, event.tool, event.input ?? {}, knownServers)
+      if (mcpVerdict && mcpVerdict.decision === "block") {
+        writeHeartbeat({ phase: "running", lastDecision: mcpVerdict.ruleId })
+        throw new Error(formatVerdict(mcpVerdict))
+      }
+
       const norm = normalizeToolCall(event.tool, event.input ?? {})
       const v = decideToolCall(policy, norm)
       if (v && v.decision === "block") {
@@ -1114,6 +1440,21 @@ export default {
     })
 
     await ctx.permission.hook("evaluate", (event) => {
+      // MCP channel: arguments are not present here, so trust/class defaults
+      // and explicit per-tool rules apply (arg rules ran in execute.before).
+      if (isMcpAction(policy, event.action, knownServers)) {
+        const v = decideMcpCall(policy, event.action, undefined, knownServers, { withArgs: false })
+        if (!v) return
+        if (v.decision === "block") {
+          event.effect = "deny"
+          event.message = formatVerdict(v)
+        } else if (event.effect === "allow") {
+          event.effect = "ask"
+          event.message = formatVerdict(v)
+        }
+        return
+      }
+
       const v = decidePermissionEvent(policy, event.action, event.resources)
       if (!v) return
       if (v.decision === "block") {
