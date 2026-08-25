@@ -22,7 +22,7 @@ The full statement is in [docs/threat-model.md](docs/threat-model.md).
 
 ## How it works — four layers
 
-1. **Native OpenCode permissions** (`config/opencode.jsonc`, generated from `policy/policy.jsonc`): ordered V2 rules — deny high-confidence secrets, ask on ambiguous names, allow ordinary work.
+1. **Native OpenCode permissions** (`config/opencode.jsonc`, generated from `policy/policy.jsonc`): 69 ordered V2 rules — deny high-confidence secrets, ask on ambiguous names, allow ordinary work.
 2. **Watcher exclusions**: reduce accidental discovery/indexing. *Not* a security boundary.
 3. **Agent policy** (`policy/AGENTS.md`): behavioral guidance only, never enforcement.
 4. **Execution-time guard** (`plugin/security-guard.js`): inspects tool calls semantically — interpreter reads, `base64`/`xxd` transforms, `curl @file`, environment dumps, git-history access, temp-copy provenance — where path rules cannot reach.

@@ -15,9 +15,9 @@ Complete rebuild of the initial scaffold into a working release candidate target
 ### Added
 
 - Single-source policy (`policy/policy.jsonc`): stable rule IDs, rationales, baseline/strict profiles.
-- Generated OpenCode V2 configuration: 66-rule ordered `permissions` array (broad allows → denies → asks → safe exceptions), 27 watcher ignores, honest `share` marker.
+- Generated OpenCode V2 configuration: 69-rule ordered `permissions` array (broad allows → denies → asks → safe exceptions), 27 watcher ignores, honest `share` marker.
 - Real V2 plugin (`plugin/security-guard.js`): zero dependencies, verified object-export API, pure decision engine (path classification, semantic shell analysis, env-dump/secret-variable detection, indirection + temp-copy provenance), value-free diagnostics, setup heartbeat for liveness monitoring.
-- Adversarial regression corpus (55 cases) with negative tests and incident replay; 101 automated tests total.
+- Adversarial regression corpus (65 cases: 43 block / 6 ask / 16 negatives) incl. incident replay; 101 automated tests total.
 - Safe installer with backups, refusal-on-conflict, merge mode, printed rollback.
 - Doctor (`scripts/doctor.mjs --live`) verifying binary/version, plugin integrity, heartbeat liveness, config invariants, log load records.
 - Dependency-free secret scanner and repository validator.
