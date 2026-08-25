@@ -35,6 +35,9 @@ jobs:
   codeql:
     name: codeql (javascript)
     runs-on: ubuntu-latest
+    # Dependabot PRs get a read-only GITHUB_TOKEN that cannot upload SARIF;
+    # CodeQL still runs on push to main after merge.
+    if: github.actor != 'dependabot[bot]'
     permissions:
       contents: read
       security-events: write
