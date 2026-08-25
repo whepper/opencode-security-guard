@@ -2,6 +2,32 @@
 
 Every claim in this repository should trace to an entry here. Newest first. "Verified" always means *executed against the stated build*, never inferred from documentation.
 
+## 2026-08-26 — P0 empirical MCP hook probe (beta-18230)
+
+Method: isolated standalone sessions (`XDG_CONFIG_HOME=<empty> opencode2 run --standalone`) in a scratch project registering a dependency-free local dummy MCP stdio server (tools `get_note`, jailed `read_file`, locally-audited `send_report` — zero network egress) plus an instrumented plugin recording every hook event. Direct protocol driver verified the server speaks MCP before any OpenCode involvement.
+
+Results:
+
+| Question | Result |
+|---|---|
+| Does `execute.before` see MCP calls? | **YES** — `event.tool = "dummy_get_note"` (`${server}_${tool}`), full `input` object visible |
+| Does `permission.evaluate` see MCP calls? | **YES** — `action = "dummy_get_note"`, `resources: ["*"]`, fires pre-execution |
+| Server identity available? | **YES** — encoded in the action/tool-name prefix; inventory also available via `ctx.mcp.list()` |
+| Tool identity / arguments available? | **YES** / **YES** (full argument objects) |
+| Does `execute.after` see MCP results? | **YES** — result content observable (basis for the P7 provenance experiment) |
+| Does a hook throw block an allowed MCP call? | **YES** — throw in `execute.before` preempted permission evaluation entirely; call never executed |
+| Does `evaluate` deny block? Message propagation? | **YES** blocks; non-interactive output surfaces generic `Unable to execute dummy_get_note` (action named; custom hook message NOT propagated through the Code-Mode path) |
+| Native deny on MCP action | **YES** — tool becomes unavailable to the model; invocation impossible (model itself audited: no side effects occurred) |
+| Native ask on MCP action (non-interactive) | `permission requested: dummy_read_file (*); auto-rejecting` — mechanical rejection incl. Code-Mode retry path |
+| Behavior differences between betas | MCP probes executed on beta-18230; beta-18219 previously verified identical for all native-tool hook paths. Re-run rig on 18219 queued for release checklist |
+
+Key architectural discovery: in this build MCP tools are exposed to the model **only through the Code-Mode `execute` dispatcher** (`tools.<server>.<tool>(...)`). Every nested MCP call still fires `before`/`evaluate`/`after` individually — enforcement composes — but thrown diagnostic messages flatten to generic failure text inside the wrapper result. Consequence for design: prefer `permission.evaluate` escalation as the primary MCP enforcement channel (its denial names the action), keep `execute.before` throws as the hard backstop.
+
+Engine design inputs locked by these results:
+
+- MCP tool-name parsing: longest-known-server-prefix split of `${server}_${tool}`; ambiguous splits (server names containing `_`) resolved against the configured server inventory from policy/config; unknown prefixes treated as unlisted-server (conservative defaults).
+- Provenance experiment (P7) is justified: result content IS observable. Still experimental, opt-in, heuristic.
+
 ## 2026-08-25 — live LLM-session enforcement demos (opencode-go/deepseek-v4-flash)
 
 Method note: `opencode2 run` reuses the shared background service, which was booted under the maintainer's real global config (their own deployed guard loads first and its hooks short-circuit ours). Clean attribution required isolated runs:
