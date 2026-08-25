@@ -1,0 +1,33 @@
+# Dependencies / build artifacts (this repo ships zero dependencies)
+node_modules/
+package-lock.json
+bun.lockb
+
+# Real secrets must never be committed. Safe examples stay tracked.
+.env
+.env.*
+!*.env.example
+!*.env.sample
+!*.env.template
+
+# Key material and credential stores
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+id_rsa*
+id_ed25519*
+id_ecdsa*
+*.tfstate
+*.tfstate.*
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+*.log
+
+# Test fixtures contain ONLY obviously-fake data and must stay tracked,
+# including files whose names look sensitive (that is the point of the corpus).
+!tests/fixtures/**

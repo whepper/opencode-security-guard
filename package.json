@@ -1,0 +1,24 @@
+{
+  "name": "opencode-security-guard",
+  "version": "0.1.0-rc.1",
+  "private": true,
+  "description": "Defense-in-depth security controls for OpenCode V2: reduce the risk that an LLM coding agent reads, exposes, modifies, or transmits sensitive local data.",
+  "type": "module",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test tests/",
+    "generate": "node scripts/generate-config.mjs",
+    "validate": "node scripts/validate.mjs",
+    "scan": "node scripts/scan-secrets.mjs",
+    "check": "node --check plugin/security-guard.js && node scripts/validate.mjs && node scripts/scan-secrets.mjs",
+    "doctor": "node scripts/doctor.mjs"
+  },
+  "opencode": {
+    "target": "opencode2 (OpenCode V2)",
+    "testedVersion": "0.0.0-beta-18219",
+    "note": "V2 is a beta; re-run scripts/doctor.mjs after every OpenCode upgrade."
+  }
+}
