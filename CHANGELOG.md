@@ -4,9 +4,9 @@ All notable changes. Format: Keep a Changelog; versioning: semantically ordered 
 
 ## Unreleased
 
-### Added
+### Changed
 
-- Live LLM-session enforcement checklist results (docs/verification-log.md) — pending environment access.
+- Compatibility matrix now covers two tested beta builds (`beta-18219`, `beta-18230`); live enforcement demos recorded in docs/verification-log.md.
 
 ## 0.1.0-rc.1 — 2026-08-25
 
@@ -32,6 +32,6 @@ Complete rebuild of the initial scaffold into a working release candidate target
 
 - License file contained only the Apache-2.0 preamble, not the license.
 
-### Verified against opencode2 `0.0.0-beta-18219`
+### Verified against opencode2 `0.0.0-beta-18219` and `0.0.0-beta-18230`
 
-Plugin object-export requirement, autoload directories, fail-open load behavior, config acceptance via `debug config`, installer→heartbeat→doctor lifecycle end-to-end. See docs/verification-log.md for scope and open items.
+Plugin object-export requirement, autoload directories, fail-open load behavior, config acceptance via `debug config`, installer→heartbeat→doctor lifecycle end-to-end, and live enforcement demos (read-tool deny `GG-ENV-001`, shell block `GGR-READ-001`, allow exception `.env.example`, grep-path block `GG-ENV-001+GREP`) with rule-level attribution via isolated standalone sessions. See docs/verification-log.md for scope and method.

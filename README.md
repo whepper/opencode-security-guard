@@ -52,7 +52,7 @@ npm run check   # syntax + structure validation + dependency-free secret scan
 
 | Component | Status |
 | --- | --- |
-| OpenCode V2 (`opencode2`) `0.0.0-beta-18219` | **tested** — config accepted, plugin loads, doctor healthy |
+| OpenCode V2 (`opencode2`) `0.0.0-beta-18219` and `0.0.0-beta-18230` | **tested** — config accepted, plugin loads, enforcement demonstrated end-to-end on both builds |
 | OpenCode V2 beta line in general | expected to work; **re-run `scripts/doctor.mjs` after every upgrade** — the plugin API is beta and may break |
 | OpenCode 1.x (`opencode`, V1 dialect) | unsupported; the V1 `permission` object syntax and `tool.execute.before` hooks differ fundamentally — see migration notes in [docs/installation.md](docs/installation.md) |
 
