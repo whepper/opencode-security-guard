@@ -1,0 +1,334 @@
+// ============================================================================
+// OpenCode Security Guard — single source of truth for security policy.
+//
+// This file is the ONLY hand-maintained policy. Everything else is derived:
+//   * config/opencode.jsonc        <- scripts/generate-config.mjs (Layer 1 + 2)
+//   * plugin/security-guard.js     <- rule block injected between markers (Layer 4)
+//
+// Dialect: OpenCode V2 permissions (verified against opencode.ai/v2/docs/permissions,
+// tested against opencode2 0.0.0-beta-18219):
+//   * rules are evaluated in order, LAST matching rule wins
+//   * if no rule matches, the result is "ask"
+//   * "*" matches zero or more characters INCLUDING "/", "?" matches one
+//   * there is no "**" — "*<segment>" patterns span directories
+//   * matching covers the entire resource value
+//   * a shell pattern ending in " *" also matches the bare command
+//
+// Rule ordering in the "permissions" array is significant and intentional:
+//   1. broad allows   (keep ordinary development usable)
+//   2. hard denies    (high-confidence secret resources)
+//   3. asks           (ambiguous resources needing human judgment)
+//   4. safe exceptions (re-allow narrow, well-known-safe cases — MUST be last)
+//
+// Every rule carries a stable ID (referenced by tests, docs, and guard
+// diagnostics) and a short rationale. Do not reorder sections casually.
+// ============================================================================
+
+{
+  "policyVersion": 1,
+
+  // Profiles select among pre-declared effect alternatives.
+  // Generate with: node scripts/generate-config.mjs --profile baseline|strict
+  "profiles": {
+    "baseline": {
+      "description": "Recommended default. Hard-denies high-confidence secrets, approval-gates ambiguous ones."
+    },
+    "strict": {
+      "description": "Higher friction. Additionally hard-denies shell startup files, HTTP webfetch, and cloud metadata endpoints.",
+      // profile overrides: rule ID -> forced effect
+      "overrides": {
+        "SG-RC-001": "deny",
+        "SG-RC-002": "deny",
+        "SG-RC-003": "deny",
+        "SG-RC-004": "deny",
+        "SG-RC-005": "deny",
+        "SG-RC-006": "deny",
+        "SG-RC-007": "deny",
+        "SG-NET-001": "deny",
+        "SG-NET-002": "ask"
+      }
+    }
+  },
+
+  // ---------------------------------------------------------------------------
+  // LAYER 1 — native OpenCode V2 permission rules (ordered!)
+  // ---------------------------------------------------------------------------
+  "permissions": [
+
+    // ---- 1. Broad allows -----------------------------------------------------
+    // V2 defaults unmatched resources to "ask"; without these the agent would
+    // prompt on every action. external_directory is deliberately NOT allowed:
+    // leaving it unmatched preserves the built-in "ask" boundary for paths
+    // outside the workspace (this is what gated ~/.zshenv access in testing).
+    { "id": "SG-BASE-001", "action": "read",       "resource": "*", "effect": "allow",
+      "reason": "Ordinary source/doc reads must not prompt; specific denies below override." },
+    { "id": "SG-BASE-002", "action": "edit",       "resource": "*", "effect": "allow",
+      "reason": "Editing project files is the agent's job; specific denies below override." },
+    { "id": "SG-BASE-003", "action": "shell",      "resource": "*", "effect": "allow",
+      "reason": "Baseline keeps shell usable; the Layer-4 guard inspects commands semantically. Set to ask manually for maximum friction." },
+    { "id": "SG-BASE-004", "action": "glob",       "resource": "*", "effect": "allow",
+      "reason": "Listing filenames is low-risk; native glob permission cannot match paths anyway (resource = pattern text)." },
+    { "id": "SG-BASE-005", "action": "grep",       "resource": "*", "effect": "allow",
+      "reason": "Native grep permission matches the REGEX, not searched paths; Layer-4 guard covers protected-path greps instead." },
+    { "action": "webfetch",  "resource": "*", "effect": "allow", "id": "SG-BASE-006",
+      "reason": "Baseline allows fetches; strict profile gates plaintext HTTP. Filesystem controls cannot stop exfiltration either way — see docs/limitations.md." },
+    { "action": "websearch", "resource": "*", "effect": "allow", "id": "SG-BASE-007",
+      "reason": "Search queries are low-sensitivity relative to the other layers." },
+    { "action": "subagent",  "resource": "*", "effect": "allow", "id": "SG-BASE-008",
+      "reason": "Subagents inherit their own permission sets; no extra baseline restriction." },
+    { "id": "SG-BASE-009", "action": "skill",     "resource": "*", "effect": "allow",
+      "reason": "Skill loading is guidance, not data access." },
+    { "action": "webfetch",  "resource": "http://*", "effect": "allow", "id": "SG-NET-001",
+      "reason": "Baseline permits plaintext HTTP fetches (many local dev registries need them); strict profile denies." },
+    { "action": "webfetch",  "resource": "*169.254*", "effect": "allow", "id": "SG-NET-002",
+      "reason": "Baseline allows link-local addresses (container gateways); strict profile DENIES cloud-metadata endpoint shapes (SSRF hardening)." },
+
+    // ---- 2. Hard denies: high-confidence secret resources --------------------
+    { "id": "SG-ENV-001", "action": "read", "resource": "*.env", "effect": "deny",
+      "reason": "Canonical environment-secret file at any depth (.env, foo/.env)." },
+    { "id": "SG-ENV-002", "action": "read", "resource": "*.env.*", "effect": "deny",
+      "reason": "Environment variants (.env.local, .env.production); safe examples are re-allowed in section 4." },
+
+    { "id": "SG-KEY-001", "action": "read", "resource": "*.pem", "effect": "deny",
+      "reason": "Private keys and private certificates conventionally use .pem; occasional public .pem is collateral damage (documented tradeoff)." },
+    { "id": "SG-KEY-002", "action": "read", "resource": "*.key", "effect": "deny",
+      "reason": "Private key material extension." },
+    { "id": "SG-KEY-003", "action": "read", "resource": "*.p12", "effect": "deny",
+      "reason": "PKCS#12 keystore." },
+    { "id": "SG-KEY-004", "action": "read", "resource": "*.pfx", "effect": "deny",
+      "reason": "PFX keystore (Windows TLS material)." },
+    { "id": "SG-KEY-005", "action": "read", "resource": "*.jks", "effect": "deny",
+      "reason": "Java keystore." },
+    { "id": "SG-KEY-006", "action": "read", "resource": "*.keystore", "effect": "deny",
+      "reason": "Generic keystore extension." },
+
+    { "id": "SG-SSH-001", "action": "read", "resource": "*.ssh/*", "effect": "deny",
+      "reason": "Everything inside any .ssh directory: private keys, config with hosts/users, known_hosts." },
+    { "id": "SG-SSH-002", "action": "read", "resource": "*id_rsa", "effect": "deny",
+      "reason": "RSA private key basename at any depth (id_rsa.pub is NOT matched — whole-value match ends at .pub)." },
+    { "id": "SG-SSH-003", "action": "read", "resource": "*id_ed25519", "effect": "deny",
+      "reason": "Ed25519 private key basename at any depth." },
+    { "id": "SG-SSH-004", "action": "read", "resource": "*id_ecdsa", "effect": "deny",
+      "reason": "ECDSA private key basename at any depth." },
+    { "id": "SG-SSH-005", "action": "read", "resource": "*id_dsa", "effect": "deny",
+      "reason": "Legacy DSA private key basename at any depth." },
+
+    { "id": "SG-CLOUD-001", "action": "read", "resource": "*.aws/*", "effect": "deny",
+      "reason": "AWS CLI credentials/config directory (~/.aws, or any .aws dir)." },
+    { "id": "SG-CLOUD-002", "action": "read", "resource": "*.azure/*", "effect": "deny",
+      "reason": "Azure CLI credentials directory." },
+    { "id": "SG-CLOUD-003", "action": "read", "resource": "*.config/gcloud/*", "effect": "deny",
+      "reason": "Google Cloud CLI credentials (the actual gcloud location, incl. application_default_credentials.json)." },
+    { "id": "SG-CLOUD-004", "action": "read", "resource": "*.kube/*", "effect": "deny",
+      "reason": "Kubernetes credentials (kubeconfig files embed cluster admin tokens)." },
+    { "id": "SG-CLOUD-005", "action": "read", "resource": "*.gnupg/*", "effect": "deny",
+      "reason": "GPG private keyring." },
+    { "id": "SG-CLOUD-006", "action": "read", "resource": "*.docker/config.json", "effect": "deny",
+      "reason": "Docker config stores registry auth blobs (base64 user:token)." },
+    { "id": "SG-CLOUD-007", "action": "read", "resource": "*.config/secrets/*", "effect": "deny",
+      "reason": "The recommended dedicated secret store (incident-2026-08-21 remediation destination)." },
+    { "id": "SG-CLOUD-008", "action": "read", "resource": "*.local/share/opencode/auth.json", "effect": "deny",
+      "reason": "OpenCode's own provider credential store." },
+
+    { "id": "SG-IAC-001", "action": "read", "resource": "*terraform.tfstate*", "effect": "deny",
+      "reason": "Terraform state embeds provider secrets in plain attributes (incl. .backup/.gz variants)." },
+    { "id": "SG-IAC-002", "action": "read", "resource": "*.tfstate", "effect": "deny",
+      "reason": "State files not prefixed with 'terraform.'." },
+    { "id": "SG-IAC-003", "action": "read", "resource": "*.tfstate.*", "effect": "deny",
+      "reason": "Backup/compressed state variants." },
+
+    { "id": "SG-PKG-001", "action": "read", "resource": "*.netrc", "effect": "deny",
+      "reason": "Plaintext machine credentials for ftp/curl." },
+    { "id": "SG-PKG-002", "action": "read", "resource": "*.npmrc", "effect": "deny",
+      "reason": "Frequently carries _authToken; project copies may too. Registry-only copies pay a small false-positive cost (documented)." },
+    { "id": "SG-PKG-003", "action": "read", "resource": "*.pypirc", "effect": "deny",
+      "reason": "PyPI upload credentials." },
+    { "id": "SG-PKG-004", "action": "read", "resource": "*.git-credentials", "effect": "deny",
+      "reason": "git credential store: plaintext URLs with embedded passwords." },
+
+    // Writes into never-legitimate-to-modify stores (edit covers edit/write/patch)
+    { "id": "SG-WRT-001", "action": "edit", "resource": "*.ssh/*", "effect": "deny",
+      "reason": "Agent must never modify SSH material (e.g. planting authorized_keys or overwriting keys)." },
+    { "id": "SG-WRT-002", "action": "edit", "resource": "*.aws/*", "effect": "deny",
+      "reason": "Agent must never modify cloud credential stores." },
+    { "id": "SG-WRT-003", "action": "edit", "resource": "*.config/gcloud/*", "effect": "deny",
+      "reason": "Agent must never modify gcloud credentials." },
+    { "id": "SG-WRT-004", "action": "edit", "resource": "*.kube/*", "effect": "deny",
+      "reason": "Agent must never modify kube configs (could redirect cluster traffic/creds)." },
+    { "id": "SG-WRT-005", "action": "edit", "resource": "*.gnupg/*", "effect": "deny",
+      "reason": "Agent must never modify the GPG keyring." },
+    { "id": "SG-WRT-006", "action": "edit", "resource": "*.config/secrets/*", "effect": "deny",
+      "reason": "The dedicated secret store is agent-immutable by policy." },
+    { "id": "SG-WRT-007", "action": "edit", "resource": "*terraform.tfstate*", "effect": "deny",
+      "reason": "Corrupting/hand-editing live infra state is destructive; reads already denied by SG-IAC-001." },
+
+    // ---- 3. Approval tier: ambiguous resources -------------------------------
+    // Deliberately NOT blanket asks on every filename containing a keyword —
+    // see docs/architecture.md "Ask for ambiguous, deny for certain".
+    { "id": "SG-RC-001", "action": "read", "resource": "*.zshenv", "effect": "ask",
+      "reason": "Shell startup file — THE incident vector (docs/incident-2026-08-21.md). Often contains exported API keys. strict profile denies." },
+    { "id": "SG-RC-002", "action": "read", "resource": "*.zshrc", "effect": "ask",
+      "reason": "Interactive shell config; occasionally exports tokens." },
+    { "id": "SG-RC-003", "action": "read", "resource": "*.zprofile", "effect": "ask",
+      "reason": "Login shell config; PATH/token exports possible." },
+    { "id": "SG-RC-004", "action": "read", "resource": "*.zlogin", "effect": "ask",
+      "reason": "Login shell config." },
+    { "id": "SG-RC-005", "action": "read", "resource": "*.bashrc", "effect": "ask",
+      "reason": "Bash interactive config; same risk class as zshrc." },
+    { "id": "SG-RC-006", "action": "read", "resource": "*.bash_profile", "effect": "ask",
+      "reason": "Bash login config; same risk class as zprofile." },
+    { "id": "SG-RC-007", "action": "read", "resource": "*.profile", "effect": "ask",
+      "reason": "POSIX sh login config; may export credentials." },
+
+    { "id": "SG-AMB-000", "action": "webfetch", "resource": "*metadata.google.internal*", "effect": "ask",
+      "reason": "Cloud metadata endpoints hand out service credentials to anything that can reach them." },
+
+    { "id": "SG-AMB-001", "action": "read", "resource": "*kubeconfig*", "effect": "ask",
+      "reason": "Non-default kubeconfig locations escape SG-CLOUD-004; cluster creds are serious but name may be benign." },
+    { "id": "SG-AMB-002", "action": "read", "resource": "*.tfvars", "effect": "ask",
+      "reason": "Terraform variable files MAY contain secrets (varname = \"password\")." },
+    { "id": "SG-AMB-003", "action": "read", "resource": "*.tfvars.json", "effect": "ask",
+      "reason": "JSON tfvars variant." },
+    { "id": "SG-AMB-004", "action": "read", "resource": "*auth.json", "effect": "ask",
+      "reason": "Generic auth-store filename; frequently fixtures, frequently real tokens." },
+    { "id": "SG-AMB-005", "action": "read", "resource": "*credentials*", "effect": "ask",
+      "reason": "Ambiguous: AWS CLI file is already denied via SG-CLOUD-001; others need human judgment." },
+    { "id": "SG-AMB-006", "action": "read", "resource": "*password*", "effect": "ask",
+      "reason": "Ambiguous filename signal; ask rather than deny to avoid blocking password-policy/docs files." },
+    { "id": "SG-AMB-007", "action": "read", "resource": "*passwd*", "effect": "ask",
+      "reason": "Ambiguous filename signal (also matches /etc/passwd-style references)." },
+    { "id": "SG-AMB-008", "action": "read", "resource": "*secret*", "effect": "ask",
+      "reason": "Ambiguous filename signal; many benign libraries/files contain 'secret'." },
+    { "id": "SG-AMB-009", "action": "read", "resource": "*token*", "effect": "ask",
+      "reason": "Ambiguous filename signal; tokenizer_* files are re-allowed by SG-EXC-005." },
+    { "id": "SG-AMB-010", "action": "read", "resource": "*api_key*", "effect": "ask",
+      "reason": "Ambiguous filename signal." },
+
+    // ---- 4. Safe exceptions — MUST remain the final section ------------------
+    // Last-match-wins makes these override everything above. Adding rules
+    // AFTER this section would silently weaken the exceptions' safety net.
+    { "id": "SG-EXC-001", "action": "read", "resource": "*.env.example", "effect": "allow",
+      "reason": "Sanitized template by strong convention; explicitly permitted by project goals." },
+    { "id": "SG-EXC-002", "action": "read", "resource": "*.env.sample", "effect": "allow",
+      "reason": "Sanitized template variant." },
+    { "id": "SG-EXC-003", "action": "read", "resource": "*.env.template", "effect": "allow",
+      "reason": "Sanitized template variant." },
+    { "id": "SG-EXC-004", "action": "read", "resource": "*.pub", "effect": "allow",
+      "reason": "PUBLIC keys are not secret (overrides *id_rsa-style denials' theoretical overlap with .pub suffixes — none today, kept as guard against future rules)." },
+    { "id": "SG-EXC-005", "action": "read", "resource": "*tokenizer*", "effect": "allow",
+      "reason": "ML tokenizer configs (e.g. tokenizer_config.json) contain vocabulary settings, not tokens. Restores usability blocked by SG-AMB-009." }
+  ],
+
+  // ---------------------------------------------------------------------------
+  // LAYER 2 — watcher exclusions. Reduce accidental discovery/indexing.
+  // THESE ARE NOT A SECURITY BOUNDARY. Any tool the agent runs can still read
+  // these paths; only OpenCode's file-watcher/indexing skips them.
+  // Standard glob syntax here (watcher accepts "**"), unlike permission rules.
+  // ---------------------------------------------------------------------------
+  "watcherIgnore": [
+    "**/.env",
+    "**/.env.*",
+    "**/*.pem",
+    "**/*.key",
+    "**/*.p12",
+    "**/*.pfx",
+    "**/*.jks",
+    "**/id_rsa",
+    "**/id_ed25519",
+    "**/id_ecdsa",
+    "**/id_dsa",
+    "**/.ssh/**",
+    "**/.aws/**",
+    "**/.azure/**",
+    "**/.config/gcloud/**",
+    "**/.kube/**",
+    "**/.gnupg/**",
+    "**/.config/secrets/**",
+    "**/*.tfstate",
+    "**/*.tfstate.*",
+    "**/.netrc",
+    "**/.npmrc",
+    "**/.pypirc",
+    "**/.git-credentials",
+    "**/.zshenv",
+    "**/.zprofile",
+    "**/.bash_profile"
+  ],
+
+  // ---------------------------------------------------------------------------
+  // LAYER 4 — execution-time guard inputs (compiled into the plugin).
+  // Path rules are basename/dir-segment oriented; the engine combines them
+  // with command semantics (readers, senders, interpreters...) which live in
+  // the engine itself because they describe HOW commands work, not WHAT is
+  // sensitive.
+  // ---------------------------------------------------------------------------
+  "guard": {
+    // Paths classified as hard-deny when referenced by dangerous shell verbs.
+    // Forms:
+    //   "basename:<name>"  — final path component equals <name>
+    //   "suffix:<pat>"     — path ends with <pat> (e.g. extension)
+    //   "dir:<segment>"    — any path component equals <segment>
+    "denyPaths": [
+      { "id": "GG-ENV-001", "form": "basename", "value": ".env", "reason": "environment secret file" },
+      { "id": "GG-ENV-002", "form": "prefixName", "value": ".env.", "exceptSuffixes": [".example", ".sample", ".template"], "reason": "environment variant (.env.production etc.; sanitized templates excluded here so they fall through to the allow list)" },
+      { "id": "GG-ENV-003", "form": "suffix", "value": ".env", "reason": "dotenv-convention file at any name (mirrors native *.env; .pub/.example stay allowed)" },
+      { "id": "GG-KEY-001", "form": "suffix", "value": ".pem", "reason": "private key/cert material" },
+      { "id": "GG-KEY-002", "form": "suffix", "value": ".key", "reason": "private key material" },
+      { "id": "GG-KEY-003", "form": "suffix", "value": ".p12", "reason": "keystore" },
+      { "id": "GG-KEY-004", "form": "suffix", "value": ".pfx", "reason": "keystore" },
+      { "id": "GG-KEY-005", "form": "suffix", "value": ".jks", "reason": "keystore" },
+      { "id": "GG-KEY-006", "form": "suffix", "value": ".keystore", "reason": "keystore" },
+      { "id": "GG-SSH-001", "form": "basename", "value": "id_rsa", "reason": "SSH private key" },
+      { "id": "GG-SSH-002", "form": "basename", "value": "id_ed25519", "reason": "SSH private key" },
+      { "id": "GG-SSH-003", "form": "basename", "value": "id_ecdsa", "reason": "SSH private key" },
+      { "id": "GG-SSH-004", "form": "basename", "value": "id_dsa", "reason": "SSH private key" },
+      { "id": "GG-SSH-005", "form": "dir", "value": ".ssh", "reason": "SSH material directory" },
+      { "id": "GG-SSH-006", "form": "basename", "value": "authorized_keys", "reason": "SSH trust store — modification/read signals tampering or recon" },
+      { "id": "GG-CLOUD-001", "form": "dir", "value": ".aws", "reason": "AWS credentials directory" },
+      { "id": "GG-CLOUD-002", "form": "dir", "value": ".azure", "reason": "Azure credentials directory" },
+      { "id": "GG-CLOUD-003", "form": "dirSegment2", "value": ".config/gcloud", "reason": "gcloud credentials directory" },
+      { "id": "GG-CLOUD-004", "form": "dir", "value": ".kube", "reason": "kubernetes credentials directory" },
+      { "id": "GG-CLOUD-005", "form": "dir", "value": ".gnupg", "reason": "GPG private keyring" },
+      { "id": "GG-CLOUD-006", "form": "dirSegment2", "value": ".config/secrets", "reason": "dedicated secret store (incident remediation)" },
+      { "id": "GG-CLOUD-007", "form": "basename", "value": "credentials", "withinDir": ".aws", "reason": "AWS shared credentials file" },
+      { "id": "GG-IAC-001", "form": "suffix", "value": ".tfstate", "reason": "terraform state embeds secrets" },
+      { "id": "GG-PKG-001", "form": "basename", "value": ".netrc", "reason": "plaintext machine credentials" },
+      { "id": "GG-PKG-002", "form": "basename", "value": ".npmrc", "reason": "may carry _authToken" },
+      { "id": "GG-PKG-003", "form": "basename", "value": ".pypirc", "reason": "PyPI credentials" },
+      { "id": "GG-PKG-004", "form": "basename", "value": ".git-credentials", "reason": "git credential store" },
+      { "id": "GG-MISC-001", "form": "basename", "value": "auth.json", "reason": "generic auth store" }
+    ],
+
+    // Approval-gated paths: dangerous enough to interrupt, ambiguous enough
+    // that blanket denial would break legitimate work.
+    "askPaths": [
+      { "id": "GG-RC-001", "form": "basename", "value": ".zshenv", "reason": "shell startup file — incident vector" },
+      { "id": "GG-RC-002", "form": "basename", "value": ".zshrc", "reason": "shell startup file" },
+      { "id": "GG-RC-003", "form": "basename", "value": ".zprofile", "reason": "shell startup file" },
+      { "id": "GG-RC-004", "form": "basename", "value": ".zlogin", "reason": "shell startup file" },
+      { "id": "GG-RC-005", "form": "basename", "value": ".bashrc", "reason": "shell startup file" },
+      { "id": "GG-RC-006", "form": "basename", "value": ".bash_profile", "reason": "shell startup file" },
+      { "id": "GG-RC-007", "form": "basename", "value": ".profile", "reason": "shell startup file" },
+      { "id": "GG-AMB-011", "form": "contains", "value": "kubeconfig", "reason": "cluster credential file outside the standard ~/.kube directory" }
+    ],
+
+    // Safe re-allows evaluated AFTER denyPaths/askPaths in the engine.
+    "exceptionPaths": [
+      { "id": "GG-EXC-001", "form": "prefixName", "value": ".env.", "suffixes": [".example", ".sample", ".template"], "reason": "sanitized templates" },
+      { "id": "GG-EXC-002", "form": "suffix", "value": ".pub", "reason": "public key material" },
+      { "id": "GG-EXC-003", "form": "contains", "value": "tokenizer", "reason": "ML tokenizer configuration, not tokens" }
+    ],
+
+    // Environment-variable NAME pattern (JS RegExp source, applied
+    // case-insensitively to variable NAMES only — never to values).
+    "envVarNamePattern": "(TOKEN|SECRET|PASSWORD|PASSWD|API_?KEY|PRIVATE_KEY|ACCESS_KEY|CLIENT_SECRET|CREDENTIAL|AUTH_|_AUTH|AUTH$)",
+
+    "profiles": {
+      "baseline": {},
+      "strict": {
+        // In strict mode these ask-paths become deny.
+        "promoteAskToDenyIds": ["GG-RC-001", "GG-RC-002", "GG-RC-003", "GG-RC-004", "GG-RC-005", "GG-RC-006", "GG-RC-007"]
+      }
+    }
+  }
+}

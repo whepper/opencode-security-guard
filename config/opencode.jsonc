@@ -1,49 +1,208 @@
 {
-  // Generalized reference configuration.
-  // IMPORTANT: adapt this to the OpenCode version you deploy.
-  // Do not copy personal credentials, MCP configuration, or machine-specific paths.
+  // ============================================================================
+  // GENERATED FILE — do not edit by hand.
+  // Source of truth: policy/policy.jsonc (profile: baseline, v1)
+  // Regenerate:      node scripts/generate-config.mjs
+  //
+  // Dialect: OpenCode V2 ("permissions" ordered array). Verified semantics:
+  //   - LAST matching rule wins; unmatched resources default to "ask"
+  //   - "*" spans "/" (there is no "**"); matching covers the whole value
+  //   - multi-resource operations deny if ANY resource resolves to deny
+  //   - explicit "deny" can never be overridden by saved approvals
+  //
+  // Section order is significant: broad allows -> hard denies -> asks -> safe
+  // exceptions (which must stay last so they win).
+  // ============================================================================
+  "$schema": "https://opencode.ai/config.json",
 
+  // Session sharing. NOTE (honesty): current V2 parses but does not act on this
+  // field (no sharing feature exists yet). It is kept as intent, not as a control.
   "share": "disabled",
 
-  // Representative policy categories.
-  // Exact rule syntax and supported permissions must be validated against
-  // the OpenCode version used by the deployment.
-  "permission": {
-    "read": {
-      ".env": "deny",
-      ".env.*": "deny",
-      ".env.example": "allow",
-      ".env.sample": "allow",
-      ".env.template": "allow",
+  // Layer 2 — watcher exclusions reduce accidental discovery/indexing.
+  // NOT A SECURITY BOUNDARY; agent-run tools can still read these paths.
+  "watcher": {
+    "ignore": [
+    "**/.env",
+    "**/.env.*",
+    "**/*.pem",
+    "**/*.key",
+    "**/*.p12",
+    "**/*.pfx",
+    "**/*.jks",
+    "**/id_rsa",
+    "**/id_ed25519",
+    "**/id_ecdsa",
+    "**/id_dsa",
+    "**/.ssh/**",
+    "**/.aws/**",
+    "**/.azure/**",
+    "**/.config/gcloud/**",
+    "**/.kube/**",
+    "**/.gnupg/**",
+    "**/.config/secrets/**",
+    "**/*.tfstate",
+    "**/*.tfstate.*",
+    "**/.netrc",
+    "**/.npmrc",
+    "**/.pypirc",
+    "**/.git-credentials",
+    "**/.zshenv",
+    "**/.zprofile",
+    "**/.bash_profile"
+    ]
+  },
 
-      "**/*.pem": "deny",
-      "**/*.key": "deny",
-      "**/*.p12": "deny",
-      "**/*.pfx": "deny",
-      "**/*.jks": "deny",
-      "**/terraform.tfstate*": "deny",
+  // Layer 1 — native permission rules (ordered).
+  "permissions": [
+    // SG-BASE-001: Ordinary source/doc reads must not prompt; specific denies below override.
+    { "action": "read", "resource": "*", "effect": "allow" },
+    // SG-BASE-002: Editing project files is the agent's job; specific denies below override.
+    { "action": "edit", "resource": "*", "effect": "allow" },
+    // SG-BASE-003: Baseline keeps shell usable; the Layer-4 guard inspects commands semantically. Set to ask manually for maximum friction.
+    { "action": "shell", "resource": "*", "effect": "allow" },
+    // SG-BASE-004: Listing filenames is low-risk; native glob permission cannot match paths anyway (resource = pattern text).
+    { "action": "glob", "resource": "*", "effect": "allow" },
+    // SG-BASE-005: Native grep permission matches the REGEX, not searched paths; Layer-4 guard covers protected-path greps instead.
+    { "action": "grep", "resource": "*", "effect": "allow" },
+    // SG-BASE-006: Baseline allows fetches; strict profile gates plaintext HTTP. Filesystem controls cannot stop exfiltration either way — see docs/limitations.md.
+    { "action": "webfetch", "resource": "*", "effect": "allow" },
+    // SG-BASE-007: Search queries are low-sensitivity relative to the other layers.
+    { "action": "websearch", "resource": "*", "effect": "allow" },
+    // SG-BASE-008: Subagents inherit their own permission sets; no extra baseline restriction.
+    { "action": "subagent", "resource": "*", "effect": "allow" },
+    // SG-BASE-009: Skill loading is guidance, not data access.
+    { "action": "skill", "resource": "*", "effect": "allow" },
+    // SG-NET-001: Baseline permits plaintext HTTP fetches (many local dev registries need them); strict profile denies.
+    { "action": "webfetch", "resource": "http://*", "effect": "allow" },
+    // SG-NET-002: Baseline allows link-local addresses (container gateways); strict profile DENIES cloud-metadata endpoint shapes (SSRF hardening).
+    { "action": "webfetch", "resource": "*169.254*", "effect": "allow" },
+    // SG-ENV-001: Canonical environment-secret file at any depth (.env, foo/.env).
+    { "action": "read", "resource": "*.env", "effect": "deny" },
+    // SG-ENV-002: Environment variants (.env.local, .env.production); safe examples are re-allowed in section 4.
+    { "action": "read", "resource": "*.env.*", "effect": "deny" },
+    // SG-KEY-001: Private keys and private certificates conventionally use .pem; occasional public .pem is collateral damage (documented tradeoff).
+    { "action": "read", "resource": "*.pem", "effect": "deny" },
+    // SG-KEY-002: Private key material extension.
+    { "action": "read", "resource": "*.key", "effect": "deny" },
+    // SG-KEY-003: PKCS#12 keystore.
+    { "action": "read", "resource": "*.p12", "effect": "deny" },
+    // SG-KEY-004: PFX keystore (Windows TLS material).
+    { "action": "read", "resource": "*.pfx", "effect": "deny" },
+    // SG-KEY-005: Java keystore.
+    { "action": "read", "resource": "*.jks", "effect": "deny" },
+    // SG-KEY-006: Generic keystore extension.
+    { "action": "read", "resource": "*.keystore", "effect": "deny" },
+    // SG-SSH-001: Everything inside any .ssh directory: private keys, config with hosts/users, known_hosts.
+    { "action": "read", "resource": "*.ssh/*", "effect": "deny" },
+    // SG-SSH-002: RSA private key basename at any depth (id_rsa.pub is NOT matched — whole-value match ends at .pub).
+    { "action": "read", "resource": "*id_rsa", "effect": "deny" },
+    // SG-SSH-003: Ed25519 private key basename at any depth.
+    { "action": "read", "resource": "*id_ed25519", "effect": "deny" },
+    // SG-SSH-004: ECDSA private key basename at any depth.
+    { "action": "read", "resource": "*id_ecdsa", "effect": "deny" },
+    // SG-SSH-005: Legacy DSA private key basename at any depth.
+    { "action": "read", "resource": "*id_dsa", "effect": "deny" },
+    // SG-CLOUD-001: AWS CLI credentials/config directory (~/.aws, or any .aws dir).
+    { "action": "read", "resource": "*.aws/*", "effect": "deny" },
+    // SG-CLOUD-002: Azure CLI credentials directory.
+    { "action": "read", "resource": "*.azure/*", "effect": "deny" },
+    // SG-CLOUD-003: Google Cloud CLI credentials (the actual gcloud location, incl. application_default_credentials.json).
+    { "action": "read", "resource": "*.config/gcloud/*", "effect": "deny" },
+    // SG-CLOUD-004: Kubernetes credentials (kubeconfig files embed cluster admin tokens).
+    { "action": "read", "resource": "*.kube/*", "effect": "deny" },
+    // SG-CLOUD-005: GPG private keyring.
+    { "action": "read", "resource": "*.gnupg/*", "effect": "deny" },
+    // SG-CLOUD-006: Docker config stores registry auth blobs (base64 user:token).
+    { "action": "read", "resource": "*.docker/config.json", "effect": "deny" },
+    // SG-CLOUD-007: The recommended dedicated secret store (incident-2026-08-21 remediation destination).
+    { "action": "read", "resource": "*.config/secrets/*", "effect": "deny" },
+    // SG-CLOUD-008: OpenCode's own provider credential store.
+    { "action": "read", "resource": "*.local/share/opencode/auth.json", "effect": "deny" },
+    // SG-IAC-001: Terraform state embeds provider secrets in plain attributes (incl. .backup/.gz variants).
+    { "action": "read", "resource": "*terraform.tfstate*", "effect": "deny" },
+    // SG-IAC-002: State files not prefixed with 'terraform.'.
+    { "action": "read", "resource": "*.tfstate", "effect": "deny" },
+    // SG-IAC-003: Backup/compressed state variants.
+    { "action": "read", "resource": "*.tfstate.*", "effect": "deny" },
+    // SG-PKG-001: Plaintext machine credentials for ftp/curl.
+    { "action": "read", "resource": "*.netrc", "effect": "deny" },
+    // SG-PKG-002: Frequently carries _authToken; project copies may too. Registry-only copies pay a small false-positive cost (documented).
+    { "action": "read", "resource": "*.npmrc", "effect": "deny" },
+    // SG-PKG-003: PyPI upload credentials.
+    { "action": "read", "resource": "*.pypirc", "effect": "deny" },
+    // SG-PKG-004: git credential store: plaintext URLs with embedded passwords.
+    { "action": "read", "resource": "*.git-credentials", "effect": "deny" },
+    // SG-WRT-001: Agent must never modify SSH material (e.g. planting authorized_keys or overwriting keys).
+    { "action": "edit", "resource": "*.ssh/*", "effect": "deny" },
+    // SG-WRT-002: Agent must never modify cloud credential stores.
+    { "action": "edit", "resource": "*.aws/*", "effect": "deny" },
+    // SG-WRT-003: Agent must never modify gcloud credentials.
+    { "action": "edit", "resource": "*.config/gcloud/*", "effect": "deny" },
+    // SG-WRT-004: Agent must never modify kube configs (could redirect cluster traffic/creds).
+    { "action": "edit", "resource": "*.kube/*", "effect": "deny" },
+    // SG-WRT-005: Agent must never modify the GPG keyring.
+    { "action": "edit", "resource": "*.gnupg/*", "effect": "deny" },
+    // SG-WRT-006: The dedicated secret store is agent-immutable by policy.
+    { "action": "edit", "resource": "*.config/secrets/*", "effect": "deny" },
+    // SG-WRT-007: Corrupting/hand-editing live infra state is destructive; reads already denied by SG-IAC-001.
+    { "action": "edit", "resource": "*terraform.tfstate*", "effect": "deny" },
+    // SG-RC-001: Shell startup file — THE incident vector (docs/incident-2026-08-21.md). Often contains exported API keys. strict profile denies.
+    { "action": "read", "resource": "*.zshenv", "effect": "ask" },
+    // SG-RC-002: Interactive shell config; occasionally exports tokens.
+    { "action": "read", "resource": "*.zshrc", "effect": "ask" },
+    // SG-RC-003: Login shell config; PATH/token exports possible.
+    { "action": "read", "resource": "*.zprofile", "effect": "ask" },
+    // SG-RC-004: Login shell config.
+    { "action": "read", "resource": "*.zlogin", "effect": "ask" },
+    // SG-RC-005: Bash interactive config; same risk class as zshrc.
+    { "action": "read", "resource": "*.bashrc", "effect": "ask" },
+    // SG-RC-006: Bash login config; same risk class as zprofile.
+    { "action": "read", "resource": "*.bash_profile", "effect": "ask" },
+    // SG-RC-007: POSIX sh login config; may export credentials.
+    { "action": "read", "resource": "*.profile", "effect": "ask" },
+    // SG-AMB-000: Cloud metadata endpoints hand out service credentials to anything that can reach them.
+    { "action": "webfetch", "resource": "*metadata.google.internal*", "effect": "ask" },
+    // SG-AMB-001: Non-default kubeconfig locations escape SG-CLOUD-004; cluster creds are serious but name may be benign.
+    { "action": "read", "resource": "*kubeconfig*", "effect": "ask" },
+    // SG-AMB-002: Terraform variable files MAY contain secrets (varname = "password").
+    { "action": "read", "resource": "*.tfvars", "effect": "ask" },
+    // SG-AMB-003: JSON tfvars variant.
+    { "action": "read", "resource": "*.tfvars.json", "effect": "ask" },
+    // SG-AMB-004: Generic auth-store filename; frequently fixtures, frequently real tokens.
+    { "action": "read", "resource": "*auth.json", "effect": "ask" },
+    // SG-AMB-005: Ambiguous: AWS CLI file is already denied via SG-CLOUD-001; others need human judgment.
+    { "action": "read", "resource": "*credentials*", "effect": "ask" },
+    // SG-AMB-006: Ambiguous filename signal; ask rather than deny to avoid blocking password-policy/docs files.
+    { "action": "read", "resource": "*password*", "effect": "ask" },
+    // SG-AMB-007: Ambiguous filename signal (also matches /etc/passwd-style references).
+    { "action": "read", "resource": "*passwd*", "effect": "ask" },
+    // SG-AMB-008: Ambiguous filename signal; many benign libraries/files contain 'secret'.
+    { "action": "read", "resource": "*secret*", "effect": "ask" },
+    // SG-AMB-009: Ambiguous filename signal; tokenizer_* files are re-allowed by SG-EXC-005.
+    { "action": "read", "resource": "*token*", "effect": "ask" },
+    // SG-AMB-010: Ambiguous filename signal.
+    { "action": "read", "resource": "*api_key*", "effect": "ask" },
+    // SG-EXC-001: Sanitized template by strong convention; explicitly permitted by project goals.
+    { "action": "read", "resource": "*.env.example", "effect": "allow" },
+    // SG-EXC-002: Sanitized template variant.
+    { "action": "read", "resource": "*.env.sample", "effect": "allow" },
+    // SG-EXC-003: Sanitized template variant.
+    { "action": "read", "resource": "*.env.template", "effect": "allow" },
+    // SG-EXC-004: PUBLIC keys are not secret (overrides *id_rsa-style denials' theoretical overlap with .pub suffixes — none today, kept as guard against future rules).
+    { "action": "read", "resource": "*.pub", "effect": "allow" },
+    // SG-EXC-005: ML tokenizer configs (e.g. tokenizer_config.json) contain vocabulary settings, not tokens. Restores usability blocked by SG-AMB-009.
+    { "action": "read", "resource": "*tokenizer*", "effect": "allow" }
+  ],
 
-      "**/.ssh/**": "deny",
-      "**/.aws/**": "deny",
-      "**/.azure/**": "deny",
-      "**/.gcp/**": "deny",
-      "**/.kube/**": "deny",
-      "**/.gnupg/**": "deny",
-
-      "**/.zshenv": "ask",
-      "**/.zprofile": "ask",
-      "**/.bashrc": "ask",
-      "**/.bash_profile": "ask",
-      "**/.profile": "ask",
-
-      "**/*token*": "ask",
-      "**/*secret*": "ask",
-      "**/*credential*": "ask",
-      "**/*password*": "ask",
-      "**/*passwd*": "ask",
-      "**/*kubeconfig*": "ask",
-      "**/*.tfvars": "ask",
-      "**/*.tfvars.json": "ask"
-    }
-  }
+  // Layer 4 — semantic shell inspection is enforced by plugin/security-guard.js,
+  // whose rule set is compiled from the same policy file. Native shell rules see
+  // raw command text only; they cannot express "reader verb x secret path".
+  //
+  // MCP note: MCP tools surface under actions named "<server>_<tool>" (e.g.
+  // "filesystem_read_file"). Filesystem-style MCP servers DO NOT pass through
+  // native read/edit rules — add explicit rules per server, e.g.:
+  //     { "action": "myserver_execute", "resource": "*", "effect": "ask" }
+  // See docs/mcp.md before connecting any MCP server that can reach files or
+  // the network.
 }

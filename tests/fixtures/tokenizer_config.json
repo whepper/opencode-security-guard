@@ -1,0 +1,6 @@
+{
+  "model_max_length": 512,
+  "tokenizer_class": "DummyTokenizer",
+  "extra_special_tokens": {},
+  "_comment": "Fixture proving 'tokenizer' files are configuration, not secrets."
+}
