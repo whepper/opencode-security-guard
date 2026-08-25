@@ -1,0 +1,49 @@
+{
+  // Generalized reference configuration.
+  // IMPORTANT: adapt this to the OpenCode version you deploy.
+  // Do not copy personal credentials, MCP configuration, or machine-specific paths.
+
+  "share": "disabled",
+
+  // Representative policy categories.
+  // Exact rule syntax and supported permissions must be validated against
+  // the OpenCode version used by the deployment.
+  "permission": {
+    "read": {
+      ".env": "deny",
+      ".env.*": "deny",
+      ".env.example": "allow",
+      ".env.sample": "allow",
+      ".env.template": "allow",
+
+      "**/*.pem": "deny",
+      "**/*.key": "deny",
+      "**/*.p12": "deny",
+      "**/*.pfx": "deny",
+      "**/*.jks": "deny",
+      "**/terraform.tfstate*": "deny",
+
+      "**/.ssh/**": "deny",
+      "**/.aws/**": "deny",
+      "**/.azure/**": "deny",
+      "**/.gcp/**": "deny",
+      "**/.kube/**": "deny",
+      "**/.gnupg/**": "deny",
+
+      "**/.zshenv": "ask",
+      "**/.zprofile": "ask",
+      "**/.bashrc": "ask",
+      "**/.bash_profile": "ask",
+      "**/.profile": "ask",
+
+      "**/*token*": "ask",
+      "**/*secret*": "ask",
+      "**/*credential*": "ask",
+      "**/*password*": "ask",
+      "**/*passwd*": "ask",
+      "**/*kubeconfig*": "ask",
+      "**/*.tfvars": "ask",
+      "**/*.tfvars.json": "ask"
+    }
+  }
+}
