@@ -1,45 +1,55 @@
 # Limitations
 
-This project intentionally documents what it cannot guarantee.
+Read this page as the honest price list of the design.
 
-## Not a sandbox
+## The plugin can fail open
 
-The agent still operates with the privileges granted by the surrounding OpenCode process and operating system.
+If `plugin/security-guard.js` throws while loading, OpenCode logs a WARN and continues **without Layer 4** (verified on beta-18219). Nothing in V2 lets a plugin make its own absence fatal. Mitigations, not solutions:
 
-## Network egress
+- the plugin writes a heartbeat file before anything else;
+- `scripts/doctor.mjs --live` fails loudly when the heartbeat is missing/stale or logs show load failures;
+- **run the doctor after every OpenCode upgrade** — beta APIs change.
 
-An unrestricted shell can communicate with arbitrary network destinations. Preventing a file read does not guarantee that a secret cannot be obtained indirectly and transmitted.
+## Network egress is uncontrolled
 
-## Semantic bypasses
+No firewall, proxy, or namespace isolation ships here. A secret that reached context can leave via any channel the agent's shell already has. See the reserved future-layer notes in [architecture.md](architecture.md).
 
-Command inspection is heuristic. Agents can construct equivalent operations through:
+## Command analysis is heuristic, not parsing
 
-- aliases;
-- scripts;
-- compiled programs;
-- archives;
-- process substitution;
-- command indirection;
-- Git object access;
-- unusual encodings;
-- other tools not recognized by the guard.
+The engine tokenizes and pattern-matches; it does not implement a shell grammar. Known blind spots (each has a corpus entry or rationale in `tests/bypass/cases.jsonc`):
 
-The goal is risk reduction, not formal proof of non-exfiltration.
+- aliases and functions (`alias rc='cat .zshenv'; rc`) — invisible to one-pass analysis;
+- deep indirection beyond one variable hop or one copy hop;
+- scripts on disk whose *content* is never visible to the guard;
+- heredoc bodies, exotic encodings, custom tools with unknown verbs;
+- unknown verbs touching protected names ask only on explicit credential flags, otherwise stay silent — deliberate false-positive control that trades coverage.
 
-## Plugin availability
+New bypass shapes belong in the corpus first, then the engine.
 
-If the execution-time plugin fails to load, the protection it provides is absent. Deployments should verify that the plugin is loaded after OpenCode upgrades.
+## Ask-tier depends on humans
 
-A future version should prefer an explicit fail-closed operational mode where supported.
+Approval fatigue is real: "allow always" saves durable project-scoped patterns which may be broader than what was displayed (several tools propose `*`). Review saved approvals periodically. Deny rules cannot be weakened this way — that is why high-confidence items deny instead of ask.
 
-## Approval prompts
+## Filename signals are insufficient by definition
 
-The `ask` tier depends on the human making a correct decision. Blanket "allow always" approvals can weaken the policy.
+`.zshenv` taught this ([incident](incident-2026-08-21.md)): any file can carry secrets regardless of name. The layers reduce but do not close this class; treat any tool output as potentially sensitive.
 
-## Existing exposure
+## Watcher exclusions are comfort, not control
 
-If a secret was already placed in model context, changing the policy cannot undo the transmission. Rotate the credential.
+Excluded paths are still fully readable by anything the agent executes.
 
-## MCP
+## `share: "disabled"` is currently inert
 
-MCP tools may have access paths that do not map cleanly onto local filesystem rules. MCP-specific controls require additional testing and potentially connector-specific policy.
+V2 parses the field but implements no sharing feature yet. It records intent only.
+
+## MCP is a separate risk area
+
+MCP tool calls surface under `<server>_<tool>` actions, so filesystem-focused denies do not apply to them. See [mcp.md](mcp.md); connector-specific policy is unbuilt and untested.
+
+## Existing exposure is forever
+
+Controls added after a leak cannot retract data already sent to a provider. Rotate first, harden second.
+
+## Version drift
+
+The target is a **beta** with explicitly unstable plugin/configuration APIs. Behavior verified on `0.0.0-beta-18219` may change under you. The doctor + test suite exist precisely to make re-verification cheap.

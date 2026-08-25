@@ -2,69 +2,73 @@
 
 ## Objective
 
-Reduce the probability that an LLM coding agent accidentally or intentionally reads, modifies, or transmits sensitive local data.
+Reduce the probability that an LLM agent operating through OpenCode reads, modifies, or transmits sensitive local data. Risk reduction, not elimination.
 
-## Protected assets
+## Assets
 
-Examples include:
-
-- API keys and access tokens
-- cloud credentials
-- SSH private keys
-- TLS private keys and keystores
-- package-manager credentials
-- Terraform state
-- shell configuration containing credentials
-- production logs and other sensitive operational data
-- local configuration stores containing secrets
+- API keys, bearer tokens, OAuth/refresh tokens
+- SSH private keys and `authorized_keys` trust stores
+- Cloud CLI credentials (`~/.aws`, `~/.azure`, `~/.config/gcloud`, `~/.kube`)
+- TLS private keys and keystores (`.pem/.key/.p12/.pfx/.jks`)
+- Terraform state (embeds provider secrets)
+- Package-manager auth (`.npmrc`, `.pypirc`, `.netrc`, `.git-credentials`, Docker `config.json`)
+- Shell startup files that export credentials (`~/.zshenv` et al.)
+- Dedicated secret stores (`~/.config/secrets/`, OpenCode's own `auth.json`)
+- Production logs and other sensitive operational data
+- The process environment of anything the agent executes
 
 ## Adversary
 
-The primary adversary is an LLM agent operating through OpenCode.
+An LLM agent that may be:
 
-The agent may be:
+- **mistaken** — debugging a PATH issue and reading `~/.zshenv` (this happened: [incident-2026-08-21.md](incident-2026-08-21.md));
+- **manipulated / prompt-injected** — repository content or tool output steering it toward secrets;
+- **over-permissioned** — broad allow rules plus saved approvals accumulating over time;
+- **deliberately malicious** — attempting known bypass shapes (interpreters, encodings, network senders, git history).
 
-- mistaken;
-- over-permissioned;
-- manipulated by prompt injection;
-- induced to execute a dangerous command;
-- deliberately attempting to access data it should not access.
-
-The model provider is considered an external recipient of any content that reaches the model context.
-
-## Security goals
-
-1. Prevent direct reads of high-confidence secret resources.
-2. Prevent writes/edits that create or alter protected resources.
-3. Detect common shell-based bypasses.
-4. Require explicit approval for ambiguous sensitive resources.
-5. Reduce accidental discovery through watcher/indexing controls.
-6. Make residual risks explicit.
-
-## Out of scope
-
-This project does not attempt to protect against:
-
-- a compromised host or operating system;
-- root-level compromise;
-- a malicious OpenCode binary;
-- a malicious or compromised plugin;
-- arbitrary native code with unrestricted privileges;
-- unrestricted network egress;
-- secrets already present in model context;
-- all possible side channels;
-- all possible MCP exfiltration paths.
+The model provider is an external recipient of everything that reaches model context. Once transmitted, exposure is irreversible locally; rotation is the only remedy.
 
 ## Trust boundaries
 
-The most important boundary is:
+```
+developer workstation
+        │  user privileges, full filesystem, full network
+        ▼
+OpenCode service (plugins, permission engine, tools)   ← trusted computing base
+        │  tool execution inherits user authority
+        ▼
+tool executions (shell, read/edit, grep, webfetch, MCP servers)
+        │  any content a tool returns enters model context
+        ▼
+LLM provider  ──►  irreversibility boundary
+```
 
-**local workstation -> OpenCode tools -> LLM provider**
+Everything below OpenCode in this diagram runs with the user's authority; nothing here can contain a determined process that OpenCode itself spawns. That is why the project claims risk reduction only.
 
-Once sensitive data crosses that boundary, local controls cannot retract it.
+## Security goals
 
-## Security posture
+1. Deny direct reads/writes of high-confidence secret resources (Layer 1).
+2. Require human approval for ambiguous resources (Layers 1+4).
+3. Detect common semantic shell bypasses (Layer 4).
+4. Reduce accidental discovery/indexing (Layer 2).
+5. Make residual failure observable — heartbeat + doctor instead of silent fail-open (Layer 4).
+6. Keep every claim testable; ship a bypass corpus with negatives (`tests/bypass/`).
 
-The project uses defense-in-depth. A failure of one layer should not automatically imply exposure, but several layers can fail together.
+## Out of scope
 
-The project must never describe itself as a complete sandbox or DLP system unless a future architecture genuinely provides those guarantees.
+This project does not protect against:
+
+- compromised OS / kernel / root-level attackers;
+- a malicious or backdoored OpenCode binary;
+- malicious plugins (a loaded plugin has the host's authority);
+- arbitrary native code execution with unrestricted privileges;
+- unrestricted network egress (no firewall/proxy layer ships here);
+- provider-side compromise, logging, or training use;
+- secrets already exposed before deployment of these controls;
+- side channels in general (timing, cache, crash dumps…);
+- complete MCP protection — connector-specific policy is an explicit future milestone ([mcp.md](mcp.md));
+- alias/function indirection invisible to one-pass command analysis (documented corpus case `BYP-IND-006`).
+
+## Posture statement
+
+Defense-in-depth: each layer assumes the others fail. The project must never describe itself as a sandbox or DLP system unless a future architecture genuinely provides those guarantees.

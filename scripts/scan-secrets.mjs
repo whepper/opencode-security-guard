@@ -49,8 +49,9 @@ for (const rel of tracked) {
     continue // binary or unreadable — name check below still ran
   }
 
-  // 1. content patterns (skip fixtures here; they are checked via marker)
-  if (!isFixture) {
+  // 1. content patterns (skip fixtures and this scanner itself — it must
+  //    contain pattern literals to self-test)
+  if (!isFixture && rel !== "scripts/scan-secrets.mjs") {
     for (const [rx, label] of CONTENT_PATTERNS) {
       if (rx.test(buf)) {
         console.error(`SECRET? ${rel}: ${label}`)

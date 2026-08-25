@@ -1,70 +1,82 @@
 # Architecture
 
-## Four-layer model
+Four independent, individually imperfect layers. No layer is trusted to work alone; several can fail together (see [limitations.md](limitations.md)).
 
-### Layer 1 — OpenCode permissions
+```
+                     ┌─────────────────────────────────────────────┐
+                     │ Layer 3: AGENTS.md policy (advisory only)   │
+                     └─────────────────────────────────────────────┘
+   agent wants to      ┌────────────────────────────────────────────┐
+   read/run something  │ Layer 1: native V2 permission rules        │  deny / ask / allow
+   ───────────────────►│ (ordered rules; last match wins)           │──────────────►
+                       └───────────────┬────────────────────────────┘
+                                       │ allow/ask decisions
+                                       ▼
+                       ┌────────────────────────────────────────────┐
+                       │ Layer 4: security-guard plugin             │  escalate to deny/ask
+                       │ pure decision engine + V2 hooks            │
+                       └───────────────┬────────────────────────────┘
+                                       │ tool executes
+                                       ▼
+                       ┌────────────────────────────────────────────┐
+                       │ Layer 2: watcher exclusions                │  discovery/indexing only
+                       └────────────────────────────────────────────┘
+```
 
-Native OpenCode permission rules provide the primary policy boundary.
+## Single source of truth
 
-Typical actions:
+`policy/policy.jsonc` is the only hand-edited policy. Every rule carries a stable ID (`SG-*` native, `GG-*` guard), an effect, and a rationale. `scripts/generate-config.mjs` derives:
 
-- `deny` for high-confidence secrets;
-- `ask` for ambiguous resources;
-- `allow` for normal development files.
+- `config/opencode.jsonc` — the native rule array and watcher list (IDs/reasons become comments because the V2 schema strips unknown fields — verified);
+- the compiled rule block inside `plugin/security-guard.js` between generated-policy markers.
 
-Rules should be evaluated using OpenCode's documented semantics for the supported version.
+Tests enforce this derivation (`tests/unit/drift.test.js`) so the layers cannot silently diverge.
 
-### Layer 2 — watcher exclusions
+## Layer 1 — native OpenCode V2 permissions
 
-Watcher exclusions reduce accidental discovery and indexing of sensitive data.
+Dialect verified against the V2 documentation and the installed beta:
 
-Examples:
+| Verified semantic | Consequence for this policy |
+| --- | --- |
+| Rules are an ordered array; **last matching rule wins** | broad allows first → denies → asks → safe exceptions **last** |
+| Unmatched resources default to `ask` | explicit broad allows are required or every action prompts |
+| `*` spans `/`; there is no `**`; matching covers the whole value | nested coverage needs leading `*` (`*.env`, `*.ssh/*`) |
+| Multi-resource ops deny if any resource denies | patching mixed file sets stays safe |
+| A shell pattern ending `" *"` also matches the bare command | command prefixes behave intuitively |
+| Saved ("allow always") approvals never override a configured `deny` | deny tier is durable even after fat-fingered approvals |
+| `external_directory` gates paths outside the workspace *before* read/edit rules | home-directory files face two gates by default |
+| grep's resource is the regex, glob's is the pattern — not paths | path-based protection of search tools is a Layer-4 job |
+| Unknown config fields are stripped (e.g. a `reason` on rules) | IDs/reasons live in comments |
 
-- `.env*`
-- private key material
-- cloud credential directories
-- Terraform state
-- `.git`
-- generated/build directories
+Rule groups (IDs in `policy/policy.jsonc`): broad allows (`SG-BASE-*`, `SG-NET-*`), environment files (`SG-ENV-*`), key material (`SG-KEY-*`), SSH (`SG-SSH-*`), cloud/kube/gpg/docker/secret-stores (`SG-CLOUD-*`, `SG-WRT-*`), Terraform state (`SG-IAC-*`), package-manager auth (`SG-PKG-*`), shell startup files (`SG-RC-*`), ambiguous asks (`SG-AMB-*`), safe exceptions (`SG-EXC-*`, always last).
 
-Watcher exclusions are **not** an authorization boundary.
+## Layer 2 — watcher exclusions
 
-### Layer 3 — agent policy
+`watcher.ignore` keeps secret-shaped paths out of OpenCode's file watching/indexing. **This is convenience, not authorization**: anything the agent executes can still read those paths.
 
-`AGENTS.md` provides behavioral guidance:
+## Layer 3 — AGENTS.md
 
-- do not read or print secrets;
-- do not circumvent permissions;
-- do not use alternative tools to bypass a protected path;
-- ask for sanitized substitutes;
-- treat production logs as sensitive;
-- minimize context sent to the model.
+Advisory instructions (`policy/AGENTS.md`): never seek/print/transmit secrets, never circumvent denials, treat startup files as sensitive, request sanitized substitutes. Presented to the model as text; **never counted as enforcement**. The installer can append it between markers to your global `AGENTS.md` without touching unrelated content.
 
-Policy is advisory and must never be relied upon as the sole security control.
+## Layer 4 — execution-time guard plugin
 
-### Layer 4 — execution-time security guard
+Single dependency-free ESM file targeting the verified V2 plugin API:
 
-The plugin inspects tool executions for semantic combinations that path-based rules cannot reliably express.
+- default export is an **object** `{ id, setup(ctx) }` (a bare function fails schema validation — probed);
+- hooks registered in `setup`: `ctx.tool.hook("execute.before")` and `ctx.permission.hook("evaluate")`;
+- `permission.evaluate` sees post-rules decisions and may escalate `allow→ask/deny`; it cannot weaken a configured deny;
+- the tool hook closes gaps whose permission resources are not paths (grep/glob) and blocks hard-denied shell operations with a structured message;
+- a pure decision engine does all analysis (path classification, command segmentation/tokenization, reader/interpreter/transformer/sender/archive/git verb classes, env-dump and secret-variable detection, `$VAR` indirection, temp-copy provenance via tracked `cp`, `--kubeconfig` flag pointers). It is unit-tested without OpenCode;
+- diagnostics are value-free: rule ID, category, matched **basename** only — never command text, variable values, or file contents;
+- **fail-open reality**: if the plugin throws during load, OpenCode logs a WARN and continues without it (probed on beta-18219). Countermeasure: the plugin writes a heartbeat JSON (`~/.local/share/opencode-security-guard/health.json`) as the very first setup step, and `scripts/doctor.mjs --live` fails loudly when it is missing/stale or when logs show load failures.
 
-Examples include:
+## Network control (future fifth layer)
 
-- Python/Node/etc. reading a protected file;
-- `base64` or `xxd` applied to protected data;
-- `openssl` consuming private keys;
-- environment dumps;
-- secret-named environment variables being printed or transmitted;
-- `curl`/similar senders consuming sensitive files.
+Filesystem controls cannot stop exfiltration once a secret is in context. A credible future design places agent execution behind one of:
 
-## Future fifth layer: network control
+- an allow-list egress proxy (per-domain policy, TLS inspection off-host);
+- Linux network namespaces / macvlan isolation per session;
+- containers or micro-VMs with no direct host network;
+- OS firewall rules scoped to the agent's uid;
 
-The major architectural gap is unrestricted network egress.
-
-A stronger deployment could place agent execution behind:
-
-- an allow-listed proxy;
-- a network namespace;
-- a container/VM boundary;
-- OS-level firewall policy;
-- another independently enforced egress-control mechanism.
-
-This repository does not currently claim to implement that layer.
+…each with real operational cost. This repository deliberately ships **none** of them rather than a placebo; the docs reserve the architecture space instead.

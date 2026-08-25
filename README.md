@@ -1,79 +1,67 @@
 # OpenCode Security Guard
 
-Defense-in-depth security controls for protecting local secrets and sensitive data from LLM agents running through OpenCode.
+Defense-in-depth controls that reduce the risk of an LLM coding agent running through **OpenCode V2** reading, exposing, modifying, or transmitting sensitive local data such as API keys, SSH material, cloud credentials, or Terraform state.
 
-> **Security boundary:** This project is not a sandbox and is not a complete DLP boundary. An agent with unrestricted shell and network access may still bypass content-based controls.
+> **What this is not:** this is not a sandbox, not a complete DLP boundary, and not a guarantee against data exfiltration. An agent with shell and network access operates with your privileges. See [docs/limitations.md](docs/limitations.md).
 
-## Why this exists
+## What problem does it solve?
 
-LLM coding agents are useful precisely because they can inspect files, execute commands, and interact with development environments. Those same capabilities can accidentally expose credentials and sensitive local data to an LLM provider.
+LLM agents are useful because they can read files and run commands. Those same capabilities can leak secrets into model context — accidentally (`cat ~/.zshenv` during a PATH debug, see [the incident case study](docs/incident-2026-08-21.md)) or through prompt injection. Once a secret reaches the model provider it must be considered compromised. This project stacks several imperfect layers so that no single mistake is sufficient.
 
-OpenCode Security Guard combines several layers:
+## What it protects — and what it does not
 
-1. **OpenCode permission rules** — deny or approval-gate sensitive resources.
-2. **Watcher exclusions** — reduce accidental indexing/discovery of sensitive data.
-3. **Global agent policy** — instruct the agent not to seek, print, or transmit secrets.
-4. **Execution-time security guard** — inspect tool executions for semantic attempts to bypass path-based rules.
+| Protected (risk reduced) | Not protected |
+| --- | --- |
+| Reads of `.env`-style files, private keys, keystores | A compromised OS, root kit, or malicious OpenCode binary |
+| Cloud/SSH/kube credential directories, Terraform state | Unrestricted network exfiltration by other means |
+| Package-manager auth files (`.npmrc`, `.netrc`, …) | Secrets already present in model context |
+| Shell commands that combine reader/sender verbs with secret paths | Every possible side channel, alias, or obfuscation |
+| Environment dumps and printing of secret-named variables | Complete MCP coverage (see [docs/mcp.md](docs/mcp.md)) |
 
-No single layer is sufficient.
+The full statement is in [docs/threat-model.md](docs/threat-model.md).
 
-## Design principles
+## How it works — four layers
 
-- Deny known high-confidence secret locations.
-- Ask before accessing ambiguous resources.
-- Treat watcher exclusions as defense-in-depth, never as an access-control boundary.
-- Detect semantic shell bypasses where simple path rules are insufficient.
-- Fail safely where practical, and make failures observable.
-- Test bypasses, not just happy paths.
-- Be explicit about residual risk.
+1. **Native OpenCode permissions** (`config/opencode.jsonc`, generated from `policy/policy.jsonc`): ordered V2 rules — deny high-confidence secrets, ask on ambiguous names, allow ordinary work.
+2. **Watcher exclusions**: reduce accidental discovery/indexing. *Not* a security boundary.
+3. **Agent policy** (`policy/AGENTS.md`): behavioral guidance only, never enforcement.
+4. **Execution-time guard** (`plugin/security-guard.js`): inspects tool calls semantically — interpreter reads, `base64`/`xxd` transforms, `curl @file`, environment dumps, git-history access, temp-copy provenance — where path rules cannot reach.
 
-## Current status
+Details: [docs/architecture.md](docs/architecture.md).
 
-This repository is the open-source development baseline derived from a real-world OpenCode hardening deployment. The initial implementation is intentionally conservative and should be treated as experimental until compatibility and bypass testing cover the relevant OpenCode versions.
+## Install
 
-## Threat model
+```sh
+node scripts/install.mjs --scope project --yes   # this repository/session only
+# or
+node scripts/install.mjs --scope global --yes    # your user account
+opencode2 service restart                        # plugins load at service start
+node scripts/doctor.mjs --live                   # verify everything
+```
 
-See [docs/threat-model.md](docs/threat-model.md).
+The installer detects OpenCode V2, shows exactly what it will change, backs up every file it touches, refuses to clobber an existing permission setup, and prints rollback commands. Full guide including the manual path: [docs/installation.md](docs/installation.md).
 
-## Important limitations
+## Test
 
-See [docs/limitations.md](docs/limitations.md). In particular, this project does not provide OS-level process isolation or reliable network egress control.
+```sh
+npm test        # unit tests + adversarial bypass corpus (no OpenCode needed)
+npm run check   # syntax + structure validation + dependency-free secret scan
+```
 
-## Security incidents
+## Supported versions
 
-The initial design was informed by a real incident in which an agent read API keys from `~/.zshenv`. Existing protections correctly blocked protected filenames, but `.zshenv` itself carried no sensitive filename signal. See [docs/incident-2026-08-21.md](docs/incident-2026-08-21.md).
+| Component | Status |
+| --- | --- |
+| OpenCode V2 (`opencode2`) `0.0.0-beta-18219` | **tested** — config accepted, plugin loads, doctor healthy |
+| OpenCode V2 beta line in general | expected to work; **re-run `scripts/doctor.mjs` after every upgrade** — the plugin API is beta and may break |
+| OpenCode 1.x (`opencode`, V1 dialect) | unsupported; the V1 `permission` object syntax and `tool.execute.before` hooks differ fundamentally — see migration notes in [docs/installation.md](docs/installation.md) |
 
-## Development roadmap
+V2 currently parses but does **not act** on the `share` config field; this repo sets `"share": "disabled"` as intent, not as a working control.
 
-### v0.1 — foundation
+## Reporting vulnerabilities
 
-- [x] Establish threat model and security goals
-- [x] Establish four-layer architecture
-- [x] Define high-confidence deny patterns
-- [x] Define approval-gated patterns
-- [x] Add execution-time bypass detection
-- [ ] Generalize the reference configuration
-- [ ] Add automated OpenCode-version compatibility tests
-- [ ] Add comprehensive bypass regression suite
-- [ ] Document installation and upgrade procedures
-- [ ] Establish release and vulnerability-handling process
-
-### v0.2 — stronger enforcement
-
-- [ ] Configurable policy profiles
-- [ ] Broader MCP-aware protection
-- [ ] Improved command normalization and semantic analysis
-- [ ] Better handling of shell indirection and archives
-- [ ] Security regression corpus
-- [ ] Network egress mitigation guidance
-
-### Future
-
-- [ ] Optional isolated execution architecture
-- [ ] More robust network policy integration
-- [ ] Formal adversarial evaluation harness
-- [ ] OpenCode release compatibility matrix
+See [SECURITY.md](SECURITY.md). Please report privately; never include real credentials.
 
 ## License
 
-Apache License 2.0. See [LICENSE](LICENSE).
+[Apache License 2.0](LICENSE).
