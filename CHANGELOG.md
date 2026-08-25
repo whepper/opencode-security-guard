@@ -8,6 +8,21 @@ All notable changes. Format: Keep a Changelog; versioning: semantically ordered 
 
 - Compatibility matrix now covers two tested beta builds (`beta-18219`, `beta-18230`); live enforcement demos recorded in docs/verification-log.md.
 
+## 0.2.0-rc.1 — 2026-08-26
+
+### Added
+
+- MCP connector security (Layer 4b): trust taxonomy (trusted/restricted/untrusted/blocked + fail-conservative unlisted defaults), token-based tool classification with false-positive discipline, explicit per-tool rules with stable IDs, argument-level protected-path and secret-named-value rules.
+- Native Layer-1 mirror rules for explicit MCP denies (hold even without the plugin).
+- Experimental cross-tool provenance tripwire (opt-in, default off) built on the P0-verified result visibility; honest evasion limits documented and test-enforced.
+- Doctor reports configured MCP servers with trust posture and warns on orphaned MCP rules.
+- MCP adversarial corpus (secret access / external write / chaining / prompt-injection / connector-trust / legitimate) + 12 engine unit tests; suite now 140 tests.
+- P0 empirical probe rig recorded: hooks, naming, blocking, ask-flow, and result visibility all verified live (docs/verification-log.md).
+
+### Fixed
+
+- Live-demo finding: with an empty trust map, failed `ctx.mcp.list()` discovery silently skipped unlisted-server asks; underscored non-native actions are now classified conservatively without inventory.
+
 ## 0.1.0-rc.1 — 2026-08-25
 
 Complete rebuild of the initial scaffold into a working release candidate targeting **OpenCode V2 only**.

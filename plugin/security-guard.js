@@ -417,7 +417,7 @@ export const GENERATED_GUARD_POLICY = Object.freeze({
 })
 // ==== END GENERATED GUARD POLICY ====
 
-export const PLUGIN_VERSION = "0.1.0-rc.1"
+export const PLUGIN_VERSION = "0.2.0-rc.1"
 export const PLUGIN_ID = "security-guard"
 
 // ============================================================================
@@ -1433,11 +1433,37 @@ export function provenanceScan(store, input) {
   return null
 }
 
+/** Apply an optional user override (sibling security-guard.config.json):
+ *  { "mcpServers": { "<name>": { "trust": "...", "reason": "..." } },
+ *    "promoteAskToDeny": true|false,
+ *    "provenance": { "enabled": true } }
+ * Pure + exported for tests. */
+export function applyGuardOverride(basePolicy, override) {
+  if (!override || typeof override !== "object") return basePolicy
+  const out = { ...basePolicy }
+  out.mcp = {
+    ...(basePolicy.mcp ?? {}),
+    ...(override.mcp ? { ...basePolicy.mcp, ...override.mcp } : {}),
+    servers: { ...(basePolicy.mcp?.servers ?? {}), ...(override.mcpServers ?? {}) },
+  }
+  if (typeof override.promoteAskToDeny === "boolean") {
+    out.promoteAskToDenyIds = override.promoteAskToDeny
+      ? (basePolicy.askPaths ?? []).map((r) => r.id)
+      : []
+  } else {
+    out.promoteAskToDenyIds = basePolicy.promoteAskToDenyIds ?? []
+  }
+  if (override.provenance && typeof override.provenance === "object") {
+    out.mcp.provenance = { ...(basePolicy.mcp?.provenance ?? {}), ...override.provenance }
+  }
+  return out
+}
+
 // ============================================================================
 // OpenCode V2 adapter
 // ============================================================================
 
-import { mkdirSync, writeFileSync } from "node:fs"
+import { mkdirSync, writeFileSync, readFileSync } from "node:fs"
 import { homedir } from "node:os"
 import path from "node:path"
 
@@ -1469,38 +1495,50 @@ export default {
   id: PLUGIN_ID,
 
   async setup(ctx) {
+    // Per-installation tuning: optional sibling file next to THIS plugin
+    // (security-guard.config.json). Verified on beta-18230: ctx.options is
+    // NOT delivered to local-file plugins, and ctx.mcp.list() returns empty
+    // data — so neither channel can carry configuration or inventory.
+    let siblingOverride = null
+    try {
+      const cfgPath = process.env.SG_CONFIG_FILE || new URL("security-guard.config.json", import.meta.url)
+      siblingOverride = JSON.parse(readFileSync(cfgPath, "utf8"))
+    } catch {}
+    const basePolicy = applyGuardOverride(GENERATED_GUARD_POLICY, siblingOverride)
     const policy = {
-      ...GENERATED_GUARD_POLICY,
-      promoteAskToDenyIds:
-        (ctx?.options?.promoteAskToDeny === true
-          ? (GENERATED_GUARD_POLICY.askPaths ?? []).map((r) => r.id)
-          : GENERATED_GUARD_POLICY.promoteAskToDenyIds) ?? [],
+      ...basePolicy,
+      promoteAskToDenyIds: basePolicy.promoteAskToDenyIds ?? [],
     }
+    policy.mcp = { ...(basePolicy.mcp ?? {}) }
 
     // Heartbeat FIRST so a crash later in setup is still observable.
     writeHeartbeat({ phase: "starting", opencode: ctx?.app?.version, policyVersion: policy.policyVersion })
 
-    // Known MCP servers: policy-declared plus whatever the runtime currently
-    // has registered (best-effort discovery; failure is non-fatal).
+    // Server inventory: policy-declared servers are authoritative; runtime
+    // discovery is merged best-effort (returned empty data on the tested
+    // beta). Unlisted servers fall back to conservative heuristics via
+    // isMcpAction/parseMcpToolName regardless.
     let knownServers = Object.keys(policy.mcp?.servers ?? {})
     try {
       const listed = await ctx.mcp.list()
-      const names = Array.isArray(listed?.servers)
-        ? listed.servers.map((s) => s?.name ?? s?.id).filter(Boolean)
-        : listed instanceof Map
-          ? [...listed.keys()]
+      const rows = Array.isArray(listed?.data)
+        ? listed.data
+        : Array.isArray(listed?.servers)
+          ? listed.servers
           : Array.isArray(listed)
-            ? listed.map((s) => s?.name ?? s?.id ?? s).filter(Boolean)
+            ? listed
             : []
+      const names = rows.map((s) => s?.name ?? s?.id ?? s).filter(Boolean)
       knownServers = [...new Set([...knownServers, ...names.map(String)])]
     } catch {}
 
     // Experimental cross-tool provenance (policy-gated, default OFF).
     const prov = policy.mcp?.provenance?.enabled === true ? createProvenanceStore() : null
     const pendingSensitive = new Map() // callID -> true (result should be marked)
+    const callIdOf = (event) => (event && typeof event.callID === "string" ? event.callID : "")
 
     await ctx.tool.hook("execute.before", (event) => {
-      const callID = clip(event.callID)
+      const callID = callIdOf(event)
       // MCP calls first: namespaced `${server}_${tool}` names never collide
       // with native tool names. Deny-class verdicts hard-block here (the
       // Code-Mode wrapper flattens messages, so blocking must not depend on
@@ -1549,7 +1587,7 @@ export default {
     if (prov) {
       try {
         await ctx.tool.hook("execute.after", (event) => {
-          const callID = clip(event.callID)
+          const callID = callIdOf(event)
           if (!callID || !pendingSensitive.has(callID)) return
           pendingSensitive.delete(callID)
           const text =
@@ -1569,6 +1607,7 @@ export default {
         if (v.decision === "block") {
           event.effect = "deny"
           event.message = formatVerdict(v)
+          writeHeartbeat({ phase: "running", lastDecision: v.ruleId })
         } else if (event.effect === "allow") {
           event.effect = "ask"
           event.message = formatVerdict(v)

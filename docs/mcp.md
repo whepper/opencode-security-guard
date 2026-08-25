@@ -1,45 +1,50 @@
-# MCP (Model Context Protocol) — a separate risk area
+# MCP (Model Context Protocol) — measured behavior and enforcement
 
-Status: **investigated, not solved.** This page records what OpenCode V2 currently offers, where MCP bypasses filesystem-focused assumptions, and what remains unbuilt. Do not assume MCP protection that has not been tested.
+Status: **implemented against measured runtime behavior** (probe results in [verification-log.md](verification-log.md), 2026-08-26 entries). This page replaces the earlier hypothesis that MCP tools simply bypass the four layers. That hypothesis was **partly wrong**, and the difference matters.
 
-## What V2 permissions can express today
+## What OpenCode V2 actually does with MCP calls
 
-Verified from the V2 permissions documentation:
+Verified on `opencode2` beta-18230 (and native-tool paths identically on beta-18219):
 
-- MCP tools surface under permission actions named `<server>_<tool>` (`.` and other unsupported characters become `_`), resource `*` or more specific;
-- rules are ordinary ordered rules, e.g.
+- Every MCP tool surfaces under an action name `` `${server}_${tool}` `` (characters normalized to `_`) — e.g. server `web-search-prime`, tool `web_search_prime` → action `web_search_prime`.
+- `permission.evaluate` fires **per MCP call** with that action and `resources: ["*"]`, pre-execution.
+- `tool.execute.before` fires per MCP call with the **full argument object**.
+- `tool.execute.after` fires with the **result content**.
+- A plugin throwing in `execute.before` blocks an otherwise-allowed MCP call mechanically (it even preempts permission evaluation).
+- Native `deny` rules make an MCP tool unavailable to the model outright; native `ask` rules produce a real permission prompt (auto-rejected in non-interactive `run` mode).
+- In this build, MCP tools are exposed to the model **only through the Code-Mode `execute` dispatcher** (`tools.<server>.<tool>(...)`). Enforcement composes per nested call — but diagnostic messages thrown for inner calls flatten to generic failure text in the wrapper result.
 
-```jsonc
-{
-  "permissions": [
-    { "action": "filesystem_read_file", "resource": "*", "effect": "ask" },
-    { "action": "my_server_execute", "resource": "rm *", "effect": "deny" }
-  ]
-}
-```
+## The five-layer picture for MCP
 
-- the plugin context can enumerate servers (`ctx.mcp.list()`) and connect/disconnect them.
+| Layer | What it does for MCP |
+| --- | --- |
+| Layer 1 — native permissions | Per-tool `<server>_<tool>` rules (deny survives saved approvals). The generator mirrors explicit policy denies as native rules so they hold even if the plugin is absent. |
+| Layer 4a — guard, permission channel | Trust × class defaults and explicit tool rules escalate `allow → ask/deny`; asks become real prompts (auto-rejected headlessly). Arguments are not visible on this channel. |
+| Layer 4b — guard, tool channel | Argument-level analysis where inputs ARE visible: protected-path tiers reuse the filesystem classifier; secret-named value shapes are flagged. Deny-tier hits hard-block; approval-tier hits block with a pointer to allowlisting (same no-prompt-channel trade-off as grep/glob). |
+| Layer 4c — provenance experiment | Opt-in tripwire: results of approval-gated calls are sampled; later arguments embedding that content are blocked. A heuristic, never a guarantee. |
+| Layers 2–3 | Watcher exclusions don't apply to remote servers; AGENTS.md guidance demonstrably steers models away from misuse but remains advisory. |
 
-## Where MCP breaks filesystem assumptions
+## Policy
 
-1. A filesystem-type MCP server reads files through its own tool actions — native `read` denies do **not** apply. `SG-ENV-001` stops OpenCode's read tool; it says nothing about `acme_fs_read_all`.
-2. Remote MCP servers receive whatever arguments the model sends — arguments themselves can carry secrets already in context.
-3. Local MCP servers run with user authority; their tool results enter model context exactly like shell output.
-4. Permission names depend on server/tool naming: renaming a server silently changes the action name your policy targets.
+Configured in `policy/policy.jsonc` under `mcp`:
 
-## Practical guidance until connector policy exists
+- `servers`: explicit trust statements — `trusted | restricted | untrusted | blocked`, each with a reason. **Transport is not a trust signal**: a local stdio wrapper can proxy a remote service (real-world example in the verification log).
+- `tools[]`: explicit per-tool overrides (`id`, `server`, `tool`, `class`, `effect`, `reason`). Explicit denies are mirrored into native rules by the generator.
+- `verbClasses` + `defaults`: token-based name classification for unlisted tools, resolved through a trust×class default table. Ambiguous verbs (`fetch`, `run`, …) map to `unknown` and never guess.
+- `argRules`: protected-path tiers and secret-named value shapes.
+- False-positive discipline is codified in tests: `tokenize_dataset` is not credential-related; `get_updates` is not a write.
 
-- Treat every configured MCP server as a trust decision equal to installing software.
-- Prefer servers you operate or vet; pin versions where possible.
-- Add explicit `<server>_<tool>` ask/deny rules per sensitive capability before connecting anything.
-- Remember Layer 4's engine sees only OpenCode-native tools; MCP calls do not flow through `bash`/`read` hooks.
+Unlisted servers run fail-conservative defaults (read/local-data/write/network/credential asks; destructive denies) rather than blanket denial — matching the project's deny-certain/ask-ambiguous philosophy.
 
-## Future milestone (explicitly unbuilt)
+## Remaining gaps (measured, not speculative)
 
-Connector-specific policy:
+1. **Code-Mode message flattening**: inner-call block reasons surface to the model as generic failure text; rule IDs land in the heartbeat and doctor instead of the chat transcript.
+2. **Name ambiguity**: `${server}_${tool}` parsing is ambiguous when server names contain `_`; resolved by longest-known-prefix and degraded conservatively otherwise.
+3. **Provenance evasions**: paraphrase, re-encoding, summarization, chunking defeat the marker store by construction (tests assert this honesty).
+4. **Destination opacity**: wrapper servers hide true endpoints; per-call network destinations are invisible unless an argument carries them. Only OS/network-level egress controls close this ([limitations.md](limitations.md)).
+5. **Policy drift**: renaming a server silently orphans its rules; doctor warns.
+6. A malicious server can lie in descriptions/names; classification of unlisted tools is heuristic by necessity.
 
-- per-server profiles (filesystem servers inherit path tiers; web-capable servers get URL tiers);
-- argument inspection for known connector schemas via `ctx.tool.hook`;
-- tests against real connectors before any claim is made.
+## Future milestone (unchanged)
 
-No MCP protection claim in this repository should be trusted until those exist.
+Connector-specific profiles driven by capability discovery (tools/list introspection at setup), per-server argument schemas, and TUI-surfaced rule messages for Code-Mode nesting — each requires another round of empirical probes before any claim.

@@ -42,9 +42,9 @@ Excluded paths are still fully readable by anything the agent executes.
 
 V2 parses the field but implements no sharing feature yet. It records intent only.
 
-## MCP is a separate risk area
+## MCP is now policy-addressable, not policy-exempt
 
-MCP tool calls surface under `<server>_<tool>` actions, so filesystem-focused denies do not apply to them. See [mcp.md](mcp.md); connector-specific policy is unbuilt and untested.
+OpenCode V2 exposes every MCP tool as its own permission action and fires guard hooks (with arguments and results) per call — measured behavior, enforcement shipped in v0.2. Remaining MCP limits: Code-Mode flattens inner-call block messages; provenance is an opt-in tripwire that paraphrase/encoding defeats; wrapper servers hide true destinations. Details in [mcp.md](mcp.md).
 
 ## Existing exposure is forever
 

@@ -2,6 +2,19 @@
 
 Every claim in this repository should trace to an entry here. Newest first. "Verified" always means *executed against the stated build*, never inferred from documentation.
 
+## 2026-08-26 — v0.2.0-rc.1 live MCP enforcement demos (beta-18230)
+
+Setup: fresh scratch project installed via `scripts/install.mjs --scope project` (shipped baseline policy — the `dummy` fixture server is deliberately **unlisted**, so conservative defaults apply), with the P0 dummy MCP server registered under `mcp.servers`. Isolated standalone sessions as in the P0 methodology.
+
+| # | Probe | Policy path | Result |
+|---|---|---|---|
+| D1 | `get_note` (read-only, unlisted) | trust default ask → permission channel | ✅ `permission requested: dummy_get_note (*); auto-rejecting`; zero tool content returned |
+| D2 | `read_file secrets.txt` (local-data, unlisted) | trust default ask | ✅ rejected; no fixture content surfaced (model fell back to probing other tools, all auto-rejected, step interrupted) |
+| D3 | `send_report` with text `DUMMY_TOKEN=FAKE-NOT-A-REAL-SECRET` | argument rule MCP-ARG-SEC-003 → hard block | ✅ call failed ("Tool execution failed"); heartbeat `lastDecision = "MCP-ARG-SEC-003"`; local audit log unchanged (no simulated transmission recorded) |
+| D4 | benign session control | n/a | ✅ normal operation unaffected |
+
+Live-demo bug found and fixed same-day: with an empty trust map AND failed `ctx.mcp.list()` discovery, unlisted-server asks were silently skipped (D1 initially returned content). Fix: inventory-independent fallback classifies any underscored non-native action conservatively (`NATIVE_TOOL_NAMES` allowlist guards against false positives). Regression test added; D1 re-run shows enforcement.
+
 ## 2026-08-26 — P0 empirical MCP hook probe (beta-18230)
 
 Method: isolated standalone sessions (`XDG_CONFIG_HOME=<empty> opencode2 run --standalone`) in a scratch project registering a dependency-free local dummy MCP stdio server (tools `get_note`, jailed `read_file`, locally-audited `send_report` — zero network egress) plus an instrumented plugin recording every hook event. Direct protocol driver verified the server speaks MCP before any OpenCode involvement.
