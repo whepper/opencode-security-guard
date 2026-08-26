@@ -2,6 +2,22 @@
 
 Every claim in this repository should trace to an entry here. Newest first. "Verified" always means *executed against the stated build*, never inferred from documentation.
 
+## 2026-08-26 — v0.2.0-rc.1 release smoke matrix (beta-18269)
+
+Pre-push release verification in a freshly installed scratch project (`install.mjs --scope project`, shipped baseline policy, dummy MCP server registered). The runtime had auto-updated to **beta-18269** between milestones (doctor flagged the drift and warned — by design); all checks below therefore executed on this third build without any repository change.
+
+| # | Check | Result |
+|---|---|---|
+| S1 | doctor | ✅ `healthy` after sessions started (warns on version drift vs tested builds — intended) |
+| S2 | native read-tool on `.env` | ✅ denied: `Read .env failed` / `BLOCKED (GG-ENV-001)` |
+| S3 | shell `cat .env` | ✅ blocked; heartbeat `lastDecision = GGR-READ-001` |
+| S4 | read `.env.example` | ✅ allowed, dummy content returned |
+| S5 | grep inside `.env` | ✅ blocked (`…+GREP` rule surface) |
+| S6 | MCP `dummy_get_note` (unlisted read-only) | ✅ `permission requested: dummy_get_note (*); auto-rejecting` |
+| S7 | MCP `send_report` with secret-named value | ✅ no transmission (audit log unchanged); mechanical `MCP-ARG-SEC-003` block with heartbeat attribution demonstrated earlier the same day (see previous entry); this run's model additionally self-refused pre-call |
+
+Environment note: creating an `.env`-named fixture file was blocked by the maintainer's own deployed guard even in scratch space; the matrix intentionally relies on policy-layer denials, which fire before any disk access, making fixture presence irrelevant to S2/S3/S5 outcomes.
+
 ## 2026-08-26 — v0.2.0-rc.1 live MCP enforcement demos (beta-18230)
 
 Setup: fresh scratch project installed via `scripts/install.mjs --scope project` (shipped baseline policy — the `dummy` fixture server is deliberately **unlisted**, so conservative defaults apply), with the P0 dummy MCP server registered under `mcp.servers`. Isolated standalone sessions as in the P0 methodology.
