@@ -186,3 +186,12 @@ test("provenance honesty: re-encoded or paraphrased relay evades detection", () 
   assert.equal(provenanceScan(store, { text: Buffer.from("unrelated").toString("base64") }), null)
   assert.equal(provenanceScan(store, { text: "a paraphrase that shares no literal substring with the original" }), null)
 })
+
+test("provenance honesty: chunked relay of a marked result is NOT tracked", () => {
+  // Splitting a marked output into chunks means each argument contains only
+  // a fragment; substring matching cannot attribute fragments (documented
+  // limitation — do not "fix" with fuzzy matching without new evidence).
+  const store = createProvenanceStore()
+  store.markSensitive("alpha-bravo-charlie-delta-echo-foxtrot-golf-hotel-india-juliet")
+  assert.equal(provenanceScan(store, { part1: "alpha-bravo-charlie-" }), null)
+})

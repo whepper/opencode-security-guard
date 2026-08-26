@@ -106,6 +106,17 @@
     { "id": "NEG-EXC-009", "category": "legitimate", "tool": "read", "input": { "filePath": "README.md" }, "expect": null, "note": "" },
     { "id": "NEG-EXC-010", "category": "legitimate", "tool": "bash", "input": { "command": "docker compose up -d" }, "expect": null, "note": "" },
     { "id": "NEG-EXC-011", "category": "legitimate", "tool": "grep", "input": { "pattern": "TODO", "path": "src/" }, "expect": null, "note": "" },
-    { "id": "NEG-EXC-012", "category": "legitimate", "tool": "bash", "input": { "command": "curl https://registry.npmjs.org/-/ping" }, "expect": null, "note": "ordinary network use is not gated by filesystem rules" }
+    { "id": "NEG-EXC-012", "category": "legitimate", "tool": "bash", "input": { "command": "curl https://registry.npmjs.org/-/ping" }, "expect": null, "note": "ordinary network use is not gated by filesystem rules" },
+    // ---- Phase 6 FP audit: keyword-class benign operations --------------------
+    { "id": "NEG-FP-001", "category": "legitimate", "tool": "bash", "input": { "command": "npm run token:linter" }, "expect": null, "note": "'token' inside a script name" },
+    { "id": "NEG-FP-002", "category": "legitimate", "tool": "bash", "input": { "command": "grep -rn secret_handling docs/" }, "expect": null, "note": "documentation search" },
+    { "id": "NEG-FP-003", "category": "legitimate", "tool": "edit", "input": { "filePath": "src/auth/session.ts" }, "expect": null, "note": "authentication IMPLEMENTATION code is not a credential store" },
+    { "id": "NEG-FP-004", "category": "legitimate", "tool": "bash", "input": { "command": "openssl s_client -connect example.com:443 -servername example.com </dev/null" }, "expect": null, "note": "TLS diagnostics; no protected input flags" },
+    { "id": "NEG-FP-005", "category": "legitimate", "tool": "bash", "input": { "command": "kubectl get secrets" }, "expect": null, "note": "cluster API usage; no local kubeconfig path argument" },
+    { "id": "NEG-FP-006", "category": "legitimate", "tool": "bash", "input": { "command": "cp tests/fixtures/dummy.env.example .env.example" }, "expect": null, "note": "fixture copying between safe names" },
+    { "id": "NEG-FP-007", "category": "legitimate", "tool": "bash", "input": { "command": "node scripts/hash-password.js --algo argon2" }, "expect": null, "note": "password-HASHING tooling is not secret access" },
+    { "id": "NEG-FP-008", "category": "legitimate", "tool": "read", "input": { "filePath": "docs/authentication.md" }, "expect": null, "note": "" },
+    { "id": "NEG-FP-009", "category": "legitimate", "tool": "bash", "input": { "command": "cargo build --features legacy-config" }, "expect": null, "note": "'config' as feature name" },
+    { "id": "NEG-FP-010", "category": "legitimate", "tool": "bash", "input": { "command": "certbot renew --quiet" }, "expect": null, "note": "certificate lifecycle tooling without protected-path args" }
   ]
 }
