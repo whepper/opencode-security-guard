@@ -523,6 +523,24 @@ function exceptionApplies(exc, path) {
 }
 
 /**
+ * Classify a path candidate across multiple representations (e.g. the
+ * original string plus its filesystem-resolved target) and return the WORST
+ * tier. Pure: resolution itself is injected by the caller.
+ */
+export function classifyPathVariants(policy, candidates, opts = {}) {
+  let worst = null
+  const rank = { deny: 3, ask: 2, pass: 1 }
+  for (const cand of candidates) {
+    if (!cand) continue
+    const cls = classifyPath(policy, cand, opts)
+    if (!worst || rank[cls.tier] > rank[worst.tier]) {
+      worst = { ...cls, resolvedFrom: candidates[0] !== cand ? cand : undefined }
+    }
+  }
+  return worst ?? { tier: "pass" }
+}
+
+/**
  * Classify a filesystem path against the compiled guard policy.
  * Order: hard denies win over exceptions (so a "tokenizer" file inside
  * ~/.aws stays denied); then profile-promoted asks; then asks; then allows;
@@ -779,6 +797,17 @@ export function analyzeCommand(policy, command, opts = {}) {
   const classifyToken = (tok) => {
     const cls = classifyPath(policy, tok, { promoteAskToDenyIds: promote })
     if (cls.tier !== "pass") return cls
+    // Symlink/alias defense: a benign-named path may resolve onto protected
+    // material. Reclassify the resolved target when a resolver is provided.
+    if (typeof opts.resolvePath === "function") {
+      try {
+        const real = opts.resolvePath(tok)
+        if (real && real !== tok) {
+          const rcls = classifyPath(policy, real, { promoteAskToDenyIds: promote })
+          if (rcls.tier !== "pass") return { ...rcls, viaResolution: true }
+        }
+      } catch {}
+    }
     const base = basenameOf(tok)
     const c = copies.find((c) => c.token === tok || basenameOf(c.token) === base)
     if (c) return { tier: c.tier, ruleId: c.ruleId, category: "protected-path", reason: "temporary copy of protected material" }
@@ -791,7 +820,7 @@ export function analyzeCommand(policy, command, opts = {}) {
 
     // Recurse into command/process substitutions first.
     for (const sub of substitutions(rawSeg)) {
-      const r = analyzeCommand(policy, sub, { promoteAskToDenyIds: promote })
+      const r = analyzeCommand(policy, sub, { promoteAskToDenyIds: promote, resolvePath: opts.resolvePath })
       if (r) {
         return { ...r, category: r.category + "+substitution" }
       }
@@ -912,7 +941,25 @@ export function analyzeCommand(policy, command, opts = {}) {
       }
       cand = cand.replace(/^\$\{?[A-Za-z_][A-Za-z0-9_]*\}?/, "")
       if (!cand || /\$\{?[A-Za-z_]/.test(cand)) return
-      if (!looksLikePath(cand) && !EMBEDDED_PATH_CANDIDATE(cand)) return
+      // Symlink/alias defense: when a resolver is available, benign-named
+      // tokens may still resolve onto protected files, so attempt resolution
+      // BEFORE the shape gates reject the token.
+      let resolvedVariant = null
+      if (typeof opts.resolvePath === "function") {
+        try {
+          const real = opts.resolvePath(cand)
+          if (real && real !== cand) resolvedVariant = real
+        } catch {}
+      }
+      if (!looksLikePath(cand) && !EMBEDDED_PATH_CANDIDATE(cand)) {
+        if (!resolvedVariant) return
+        // Only the resolved target mattered; classify that.
+        if (seenTokens.has(cand)) return
+        seenTokens.add(cand)
+        const cls = classifyToken(cand)
+        if (cls.tier !== "pass") classified.push({ token: basenameOf(cand), ...cls })
+        return
+      }
       if (seenTokens.has(cand)) return
       seenTokens.add(cand)
       const cls = classifyToken(cand)
@@ -1132,7 +1179,7 @@ function mcpTrustReason(policyMcp, server) {
 
 /** Argument-level rules: protected-path tiers reuse the filesystem classifier;
  *  secret-named values are flagged conservatively. Returns escalations only. */
-export function mcpArgumentVerdicts(policy, input, promote) {
+export function mcpArgumentVerdicts(policy, input, promote, opts = {}) {
   const out = []
   const strings = []
   const collect = (v, key) => {
@@ -1144,10 +1191,20 @@ export function mcpArgumentVerdicts(policy, input, promote) {
   for (const [, value] of strings) {
     const norm = normalizePathToken(value)
     if (norm && looksLikePath(norm)) {
-      const cls = classifyPath(policy, norm, { promoteAskToDenyIds: promote })
+      // Symlink/alias defense: classify the literal path AND its resolved
+      // target (when the caller provides a resolver), escalating to the
+      // worst tier. Closes the benign-alias -> secret-file bypass.
+      const candidates = [norm]
+      if (opts.resolvePath) {
+        try {
+          const real = opts.resolvePath(norm)
+          if (real && real !== norm) candidates.push(real)
+        } catch {}
+      }
+      const cls = classifyPathVariants(policy, candidates, { promoteAskToDenyIds: promote })
       if (cls.tier !== "pass") {
         out.push({
-          decision: cls.tier === "deny" ? "block" : "block", // arg-layer has no prompt channel
+          decision: "block", // arg-layer has no prompt channel
           ruleId: cls.tier === "deny" ? "MCP-ARG-PATH-001" : "MCP-ARG-PATH-002",
           category: "mcp-protected-path",
           reason: (cls.tier === "deny" ? cls.reason : "approval-gated: " + cls.reason),
@@ -1210,7 +1267,7 @@ export function decideMcpCall(policy, toolName, input, knownServers = [], opts =
   }
 
   if (opts.withArgs !== false) {
-    const argHits = mcpArgumentVerdicts(policy, input, opts.promoteAskToDenyIds ?? policy.promoteAskToDenyIds ?? [])
+    const argHits = mcpArgumentVerdicts(policy, input, opts.promoteAskToDenyIds ?? policy.promoteAskToDenyIds ?? [], { resolvePath: opts.resolvePath })
     // Highest escalation wins; argument evidence always surfaces.
     if (argHits.length) {
       const worst = argHits.find((h) => h.decision === "block") ?? argHits[0]
@@ -1272,12 +1329,21 @@ export function normalizeToolCall(tool, input = {}) {
 }
 
 /** Decide on a normalized tool call. Returns null (no opinion) or a verdict. */
-export function decideToolCall(policy, toolCall) {
+export function decideToolCall(policy, toolCall, opts = {}) {
   switch (toolCall.kind) {
     case "shell":
-      return analyzeCommand(policy, toolCall.command)
+      return analyzeCommand(policy, toolCall.command, { resolvePath: opts.resolvePath, promoteAskToDenyIds: policy.promoteAskToDenyIds ?? [] })
     case "path": {
-      const cls = classifyPath(policy, toolCall.path)
+      // Symlink/alias defense: classify the literal path and (when a resolver
+      // is available) its on-disk target, escalating to the worst tier.
+      const candidates = [toolCall.path]
+      if (typeof opts.resolvePath === "function") {
+        try {
+          const real = opts.resolvePath(toolCall.path)
+          if (real && real !== toolCall.path) candidates.push(real)
+        } catch {}
+      }
+      const cls = classifyPathVariants(policy, candidates, { promoteAskToDenyIds: policy.promoteAskToDenyIds ?? [] })
       if (cls.tier === "pass") return null
       if (toolCall.mode === "write" && cls.tier === "ask") {
         return { decision: "ask", ruleId: cls.ruleId, category: "approval-required", reason: "writing to " + cls.reason, matched: basenameOf(toolCall.path) }
@@ -1323,11 +1389,11 @@ export function decideToolCall(policy, toolCall) {
 
 /** Decide on a permission-evaluate event (V2 hook). Resources for the shell
  *  action are the raw command text; for read/edit they are paths. */
-export function decidePermissionEvent(policy, action, resources) {
+export function decidePermissionEvent(policy, action, resources, opts = {}) {
   if (!Array.isArray(resources)) return null
   for (const res of resources) {
     if (action === "shell") {
-      const r = analyzeCommand(policy, String(res))
+      const r = analyzeCommand(policy, String(res), { resolvePath: opts.resolvePath, promoteAskToDenyIds: policy.promoteAskToDenyIds ?? [] })
       if (r) return r
       continue
     }
@@ -1463,7 +1529,7 @@ export function applyGuardOverride(basePolicy, override) {
 // OpenCode V2 adapter
 // ============================================================================
 
-import { mkdirSync, writeFileSync, readFileSync } from "node:fs"
+import { mkdirSync, writeFileSync, readFileSync, realpathSync } from "node:fs"
 import { homedir } from "node:os"
 import path from "node:path"
 
@@ -1537,6 +1603,17 @@ export default {
     const pendingSensitive = new Map() // callID -> true (result should be marked)
     const callIdOf = (event) => (event && typeof event.callID === "string" ? event.callID : "")
 
+    // Symlink/alias defense: resolve on-disk targets so benign-named links
+    // onto protected material are classified by what they really are.
+    const resolvePath = (p) => {
+      try {
+        if (typeof p !== "string" || !p) return null
+        return realpathSync(p)
+      } catch {
+        return null
+      }
+    }
+
     await ctx.tool.hook("execute.before", (event) => {
       const callID = callIdOf(event)
       // MCP calls first: namespaced `${server}_${tool}` names never collide
@@ -1544,7 +1621,7 @@ export default {
       // Code-Mode wrapper flattens messages, so blocking must not depend on
       // message propagation); approval-tier verdicts are enforced by the
       // permission channel, which fires per nested call and CAN prompt.
-      const mcpVerdict = decideMcpCall(policy, event.tool, event.input ?? {}, knownServers)
+      const mcpVerdict = decideMcpCall(policy, event.tool, event.input ?? {}, knownServers, { resolvePath })
       if (prov) {
         const scanHit = provenanceScan(prov, event.input ?? {})
         if (scanHit) {
@@ -1564,7 +1641,7 @@ export default {
       }
 
       const norm = normalizeToolCall(event.tool, event.input ?? {})
-      const v = decideToolCall(policy, norm)
+      const v = decideToolCall(policy, norm, { resolvePath })
       if (v && v.decision === "block") {
         writeHeartbeat({ phase: "running", lastDecision: v.ruleId })
         throw new Error(formatVerdict(v))
@@ -1615,7 +1692,7 @@ export default {
         return
       }
 
-      const v = decidePermissionEvent(policy, event.action, event.resources)
+      const v = decidePermissionEvent(policy, event.action, event.resources, { resolvePath })
       if (!v) return
       if (v.decision === "block") {
         event.effect = "deny"

@@ -38,6 +38,8 @@ Unlisted servers run fail-conservative defaults (read/local-data/write/network/c
 
 ## Remaining gaps (measured, not speculative)
 
+0. **No structured server/tool identity**: `ctx.mcp.list()` returned empty `data` on beta-18269 and tool events carry only the flattened `${server}_${tool}` string — so the guard must parse names (longest-known-prefix, conservative fallback). Investigated in the P0/18269 probes; if a later beta exposes structured identity, parsing should be replaced.
+
 1. **Code-Mode message flattening**: inner-call block reasons surface to the model as generic failure text; rule IDs land in the heartbeat and doctor instead of the chat transcript.
 2. **Name ambiguity**: `${server}_${tool}` parsing is ambiguous when server names contain `_`; resolved by longest-known-prefix and degraded conservatively otherwise.
 3. **Provenance evasions**: paraphrase, re-encoding, summarization, chunking defeat the marker store by construction (tests assert this honesty).

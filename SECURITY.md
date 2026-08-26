@@ -14,16 +14,32 @@ OpenCode Security Guard is security-sensitive software whose entire purpose is r
 
 Please use GitHub's **Private vulnerability reporting** on this repository (Security tab → Report a vulnerability). If unavailable, contact the maintainers directly and expect a public advisory afterwards.
 
-Please include:
+Do not open public issues for suspected vulnerabilities.
+
+## What to include
 
 - affected version or commit;
-- OpenCode version (`opencode2 --version`) and OS;
+- OpenCode V2 version (`opencode2 --version`) and OS;
 - configuration/profile involved;
-- reproduction steps — ideally as a proposed `tests/bypass/cases.jsonc` entry with **dummy** values;
+- reproduction steps — ideally as a proposed `tests/bypass/cases.jsonc` or `tests/bypass/mcp-cases.jsonc` entry with **dummy** values;
 - expected vs observed behavior;
 - whether any real credential may have been exposed.
 
-Do not include live credentials in reports. Use obviously fake values.
+Never include live credentials in reports. Use obviously fake values.
+
+## Bypass report template
+
+```text
+OpenCode version:        opencode2 <version>
+Security Guard version:  <from security-test output>
+OS:                      <os/version>
+Layer expected to block: native permission | guard-shell | guard-mcp | provenance | other
+Actual behavior:         allowed | asked-and-approved | blocked-with-wrong-rule
+Reproduction:            <exact prompt/command; dummy data only>
+Impact:                  what could leak, to where
+Sensitive data exposed?  yes/no — if yes, rotate first, report second
+security-test output:    <paste the pasteable summary block>
+```
 
 ## Response expectations
 

@@ -118,3 +118,30 @@ test("permission.evaluate leaves configured denies untouched (deny wins)", async
   await hooks["perm:evaluate"](event)
   assert.equal(event.effect, "deny") // unchanged, no message injected
 })
+
+// ---------------------------------------------------------------------------
+// Real-filesystem symlink integration (BYP-FS-LINK regression, end-to-end)
+// ---------------------------------------------------------------------------
+
+import { mkdtempSync as mkd2, symlinkSync, writeFileSync as wfs, rmSync as rm2 } from "node:fs"
+
+test("real symlink: benign name resolving onto a secret file is blocked by the adapter", async () => {
+  const dir = mkd2(path.join(tmpdir(), "sg-symlink-"))
+  try {
+    wfs(path.join(dir, ".env"), "# FAKE-NOT-A-REAL-SECRET\nX=1\n")
+    symlinkSync(path.join(dir, ".env"), path.join(dir, "mynotes.txt"))
+    const { ctx, hooks } = makeCtx()
+    process.env.SG_CONFIG_FILE = path.join(dir, "no-config.json")
+    try {
+      await securityGuard.setup(ctx)
+      assert.throws(
+        () => hooks["execute.before"][0]({ tool: "read", callID: "c9", input: { filePath: path.join(dir, "mynotes.txt") } }),
+        /GG-ENV-001/
+      )
+    } finally {
+      delete process.env.SG_CONFIG_FILE
+    }
+  } finally {
+    rm2(dir, { recursive: true, force: true })
+  }
+})

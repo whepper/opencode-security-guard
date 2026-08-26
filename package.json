@@ -14,7 +14,9 @@
     "validate": "node scripts/validate.mjs",
     "scan": "node scripts/scan-secrets.mjs",
     "check": "node --check plugin/security-guard.js && node scripts/validate.mjs && node scripts/scan-secrets.mjs",
-    "doctor": "node scripts/doctor.mjs"
+    "doctor": "node scripts/doctor.mjs",
+    "security-test": "node scripts/security-test.mjs",
+    "uninstall": "node scripts/uninstall.mjs"
   },
   "opencode": {
     "target": "opencode2 (OpenCode V2)",

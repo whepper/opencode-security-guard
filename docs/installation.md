@@ -2,7 +2,13 @@
 
 Target: **OpenCode V2 (`opencode2`)**. OpenCode 1.x is not supported (see the migration note at the bottom).
 
-## Automatic install
+## Prerequisites
+
+- OpenCode V2 (`opencode2`) — see the compatibility matrix in the [README](../README.md#supported-versions)
+- Node.js ≥ 20 (for installer/doctor/security-test; the plugin itself runs inside OpenCode)
+- A clone of this repository (scripts run from it)
+
+## Install
 
 ```sh
 node scripts/install.mjs --scope project --yes   # affects this project only
@@ -52,6 +58,25 @@ Run from a scratch project that has the guard installed. Each prompt is delibera
 | 4 | `Use your grep tool to search inside .env for KEY=` | blocked — search-path coverage |
 
 Also confirm ordinary work still flows: reading `README.md`, running tests, editing sources.
+
+## Uninstall
+
+```sh
+node scripts/uninstall.mjs --scope project --yes    # or --scope global
+opencode2 service restart
+node scripts/doctor.mjs                              # should now report the plugin missing
+```
+
+The uninstaller removes the plugin, any sibling override config, and the generated `opencode.jsonc` **only if it still matches this repository's generated output byte-for-byte**. Drifted or hand-customized configs are left untouched with instructions. Install-time backups are preserved and listed.
+
+## Security self-test for external users
+
+```sh
+node scripts/security-test.mjs            # offline; synthetic data only
+node scripts/security-test.mjs --json     # machine-readable
+```
+
+Verifies the installed plugin's engine against representative bypass + false-positive cases and prints a pasteable summary (versions included) for bug reports. It never reads your files.
 
 ## Upgrades
 
