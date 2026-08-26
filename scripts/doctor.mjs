@@ -56,9 +56,16 @@ try {
 }
 {
   const pkg = JSON.parse(readFileSync(path.join(ROOT, "package.json"), "utf8"))
-  const tested = pkg.opencode?.testedVersion
-  if (ocVersion && tested && !ocVersion.includes(tested)) {
-    warn(`running ${ocVersion}, tested against ${tested} — re-run bypass tests and review docs/limitations.md`)
+  // testedVersions is an array of full version strings (e.g. "0.0.0-beta-18230");
+  // fall back to the older single-string field for local checkouts.
+  const testedList = []
+    .concat(pkg.opencode?.testedVersions ?? [], pkg.opencode?.testedVersion ?? [])
+    .filter(Boolean)
+  const matched = testedList.some((t) => ocVersion && ocVersion.includes(t))
+  if (ocVersion && testedList.length && !matched) {
+    warn(`running ${ocVersion}, tested against: ${testedList.join(", ")} — re-run bypass tests and review docs/limitations.md`)
+  } else if (ocVersion) {
+    ok(`matches a tested build (${testedList.join(", ")})`)
   }
 }
 

@@ -60,9 +60,12 @@ ocVersion = execFileSync(ocBin, ["--version"], { encoding: "utf8" }).trim()
 say(`detected ${ocBin} (${ocVersion})`)
 {
   const pkg = JSON.parse(readFileSync(path.join(ROOT, "package.json"), "utf8"))
-  const tested = pkg.opencode?.testedVersion
-  if (tested && !ocVersion.includes(tested)) {
-    say(`NOTE installed version differs from the tested build (${tested});`)
+  const testedList = []
+    .concat(pkg.opencode?.testedVersions ?? [], pkg.opencode?.testedVersion ?? [])
+    .filter(Boolean)
+  const matched = testedList.some((t) => ocVersion && ocVersion.includes(t))
+  if (testedList.length && !matched) {
+    say(`NOTE installed version differs from the tested builds (${testedList.join(", ")});`)
     say(`     re-run scripts/doctor.mjs after upgrading and review CHANGELOG notes.`)
   }
 }

@@ -1,6 +1,6 @@
 {
   "name": "opencode-security-guard",
-  "version": "0.2.0-rc.1",
+  "version": "0.2.0",
   "private": true,
   "description": "Defense-in-depth security controls for OpenCode V2: reduce the risk that an LLM coding agent reads, exposes, modifies, or transmits sensitive local data.",
   "type": "module",
@@ -20,7 +20,11 @@
   },
   "opencode": {
     "target": "opencode2 (OpenCode V2)",
-    "testedVersion": "0.0.0-beta-18219",
+    "testedVersions": [
+      "0.0.0-beta-18219",
+      "0.0.0-beta-18230",
+      "0.0.0-beta-18269"
+    ],
     "note": "V2 is a beta; re-run scripts/doctor.mjs after every OpenCode upgrade."
   }
 }

@@ -417,7 +417,7 @@ export const GENERATED_GUARD_POLICY = Object.freeze({
 })
 // ==== END GENERATED GUARD POLICY ====
 
-export const PLUGIN_VERSION = "0.2.0-rc.1"
+export const PLUGIN_VERSION = "0.2.0"
 export const PLUGIN_ID = "security-guard"
 
 // ============================================================================
