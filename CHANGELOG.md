@@ -68,7 +68,7 @@ corpus entry in `tests/bypass/cases.jsonc`.
 
 ### Changed
 
-- Native rule count 69 → 73; test suite 163 → 210; corpus 60 → 82 cases.
+- Native rule count 69 → 73; test suite 163 → 217; adversarial corpus 93 → 137 cases (60 new positive/regression cases, 13 new benign false-positive cases).
 - Transformer verb list extended (`base32`, `uuencode`, compressors); all
   backtick substitutions are extracted, not just the first pair.
 
