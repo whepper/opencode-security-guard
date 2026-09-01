@@ -28,6 +28,9 @@
     { "id": "MCP-SEC-003", "category": "local-secret-access", "tool": "fs_read_file", "input": { "path": "~/.aws/credentials" }, "expect": "block", "note": "cloud credentials" },
     { "id": "MCP-SEC-004", "category": "local-secret-access", "tool": "dummy_read_file", "input": { "file": ".zshenv" }, "expect": "block", "note": "shell startup file (incident vector); arg-layer ask downgrades to block" },
     { "id": "MCP-SEC-005", "category": "local-secret-access", "tool": "dummy_read_file", "input": { "file": "terraform.tfstate" }, "expect": "block", "note": "" },
+    { "id": "MCP-SEC-006", "category": "local-secret-access", "tool": "fs_read_file", "input": { "path": "~/.SSH/CONFIG" }, "expect": "block", "note": "case-insensitive classifier (APFS/NTFS reality)" },
+    { "id": "MCP-SEC-007", "category": "local-secret-access", "tool": "dummy_run_command", "input": { "cmd": "cd /srv/app && cat .env" }, "expect": "block", "note": "protected reference EMBEDDED in a longer argument string (v0.3 embedded scan)" },
+    { "id": "MCP-SEC-008", "category": "local-secret-access", "tool": "dummy_write_file", "input": { "path": "/Users/dummy/.config/opencode/plugins/security-guard.config.json", "content": "{}" }, "expect": "block", "note": "guard self-protection through an MCP filesystem tool on a TRUSTED server" },
 
     // ---- external transmission ----------------------------------------------
     { "id": "MCP-EXT-001", "category": "external-write", "tool": "github_create_issue", "input": { "title": "t", "body": "FAKE-NOT-A-REAL-SECRET dummy" }, "expect": "ask", "note": "restricted server, external-write class" },

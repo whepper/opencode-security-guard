@@ -280,6 +280,37 @@ export const GENERATED_GUARD_POLICY = Object.freeze({
       "reason": "ML tokenizer configuration, not tokens"
     }
   ],
+  "selfProtectPaths": [
+    {
+      "id": "GG-SLF-001",
+      "form": "basename",
+      "value": "security-guard.config.json",
+      "effect": "deny",
+      "reason": "guard runtime override file — writing it is how a guard gets silently weakened"
+    },
+    {
+      "id": "GG-SLF-002",
+      "form": "basename",
+      "value": "health.json",
+      "withinDir": "opencode-security-guard",
+      "effect": "deny",
+      "reason": "guard heartbeat file — a forged heartbeat disables fail-open detection"
+    },
+    {
+      "id": "GG-SLF-003",
+      "form": "basename",
+      "value": "security-guard.js",
+      "effect": "ask",
+      "reason": "guard plugin source — legitimate during development, a tamper vector everywhere else"
+    },
+    {
+      "id": "GG-SLF-004",
+      "form": "basename",
+      "value": "policy.jsonc",
+      "effect": "ask",
+      "reason": "policy source of truth"
+    }
+  ],
   "promoteAskToDenyIds": [],
   "envVarNamePattern": "(TOKEN|SECRET|PASSWORD|PASSWD|API_?KEY|PRIVATE_KEY|ACCESS_KEY|CLIENT_SECRET|CREDENTIAL|AUTH_|_AUTH|AUTH$)",
   "mcp": {
@@ -417,7 +448,7 @@ export const GENERATED_GUARD_POLICY = Object.freeze({
 })
 // ==== END GENERATED GUARD POLICY ====
 
-export const PLUGIN_VERSION = "0.2.0"
+export const PLUGIN_VERSION = "0.3.0"
 export const PLUGIN_ID = "security-guard"
 
 // ============================================================================
@@ -541,14 +572,64 @@ export function classifyPathVariants(policy, candidates, opts = {}) {
 }
 
 /**
+ * Self-protection: the guard's own attack surface. Evaluated ONLY for
+ * write-intent callers (edit/write tools, `>` redirections, file-management
+ * shell verbs, MCP arguments) — reading `security-guard.js` is legitimate
+ * review work, rewriting it (or its override file, or its heartbeat) is how an
+ * agent disarms Layer 4.
+ */
+export function classifySelfProtect(policy, rawPath) {
+  const p = normalizePathToken(rawPath).toLowerCase()
+  if (!p) return null
+  for (const rule of policy.selfProtectPaths ?? []) {
+    if (formMatches({ form: rule.form, value: rule.value, withinDir: rule.withinDir }, p)) {
+      return {
+        tier: rule.effect === "ask" ? "ask" : "deny",
+        ruleId: rule.id,
+        category: "guard-self-protection",
+        reason: rule.reason,
+      }
+    }
+  }
+  return null
+}
+
+/**
+ * Basenames of protected-material references embedded in arbitrary text
+ * (interpreter code, script bodies, quoted paths). Deny-tier hits only — the
+ * caller decides whether that means ask or block.
+ */
+function embeddedProtectedHits(policy, text) {
+  const out = []
+  if (!text) return out
+  EMBEDDED_PATH_RE.lastIndex = 0
+  for (const m of String(text).matchAll(EMBEDDED_PATH_RE)) {
+    const cls = classifyPath(policy, m[0])
+    if (cls.tier === "deny") out.push(basenameOf(m[0]))
+  }
+  return out
+}
+
+/**
  * Classify a filesystem path against the compiled guard policy.
  * Order: hard denies win over exceptions (so a "tokenizer" file inside
  * ~/.aws stays denied); then profile-promoted asks; then asks; then allows;
- * then "pass" (= no guard opinion).
+ * then "pass" (= no guard opinion). Self-protection runs first but only when
+ * the caller declares write intent (opts.mode === "write").
+ *
+ * Comparison is case-insensitive: macOS APFS and Windows NTFS are
+ * case-insensitive by default, so `cat .ENV` opens `.env` there. Treating
+ * case as a security signal on Linux costs a rare false positive
+ * (`FOO.PEM` is a misnamed public cert) against a universal bypass class.
  */
 export function classifyPath(policy, rawPath, opts = {}) {
-  const p = normalizePathToken(rawPath)
+  const p = normalizePathToken(rawPath).toLowerCase()
   if (!p) return { tier: "pass" }
+
+  if (opts.mode === "write") {
+    const self = classifySelfProtect(policy, p)
+    if (self) return self
+  }
 
   for (const rule of policy.denyPaths ?? []) {
     if (formMatches(rule, p)) {
@@ -581,7 +662,7 @@ const READER_VERBS = new Set([
   "grep", "egrep", "fgrep", "rg", "ack", "ag",
   "awk", "gawk", "sed", "jq", "yq", "cut", "sort", "uniq", "wc", "diff", "vim", "vi", "nano", "code",
 ])
-const TRANSFORMER_VERBS = new Set(["base64", "xxd", "od", "hexdump", "openssl", "gpg", "iconv", "uudecode"])
+const TRANSFORMER_VERBS = new Set(["base64", "base32", "xxd", "od", "hexdump", "openssl", "gpg", "iconv", "uudecode", "uuencode", "bzip2", "gzip", "zstd", "xz"])
 const INTERPRETERS = new Set([
   "python", "python3", "python3.11", "python3.12", "node", "deno", "bun",
   "ruby", "perl", "php", "php8", "lua", "lua5.1", "osascript", "osacompile", "rscript", "jshell",
@@ -595,6 +676,20 @@ const SENDER_VERBS = new Set([
 ])
 const ARCHIVE_CREATORS = new Set(["tar", "zip", "jar", "7z", "7za", "ditto"])
 const GIT_CONTENT_SUBCOMMANDS = new Set(["show", "cat-file", "archive", "log", "diff", "whatchanged"])
+// Re-entry wrappers: programs whose ARGUMENTS are themselves a command. Without
+// recursive analysis these defeat every verb-class rule, because the outer verb
+// (`bash`, `eval`, `env`, `sudo`, …) belongs to no class:
+//   bash -c 'echo $AWS_SECRET_ACCESS_KEY'   -> printer check never sees `echo`
+//   env printenv                            -> env-dump check never fires
+const SHELL_REEXEC_VERBS = new Set(["sh", "bash", "zsh", "dash", "ksh", "fish", "csh", "tcsh", "ash"])
+const COMMAND_PREFIX_VERBS = new Set([
+  "eval", "exec", "env", "command", "builtin", "sudo", "doas", "nohup", "setsid",
+  "time", "nice", "stdbuf", "choom", "ionice", "chronic", "runuser", "su",
+  "chpst", "supervise", "watch", "entr", "chroot", "unshare", "nsenter",
+])
+// Flags of prefix wrappers that consume the FOLLOWING token as their own value,
+// so it is not mistaken for the wrapped command name.
+const PREFIX_FLAG_WITH_VALUE = new Set(["-u", "-g", "-U", "-n", "-t", "-i", "-o", "-e", "-p", "-s", "-l", "-r", "-C", "-c", "-a", "-b", "-d", "-f", "-k", "-w"])
 const ENV_DUMP_VERBS = new Set(["env", "printenv", "alias"])
 const PRINTERS = new Set(["echo", "printf", "puts", "print", "logger", "tee"])
 // Verbs whose purpose is creating/moving/managing files, not reading them.
@@ -605,6 +700,15 @@ const FILE_MANAGEMENT_VERBS = new Set([
   "cp", "mv", "ln", "touch", "mkdir", "rmdir", "rm", "chmod", "chown", "chgrp",
   "install", "rsync_local_placeholder", "ssh-keygen", "gpgsplit", "shred",
 ])
+// Verbs that can OVERWRITE a file. Used only by the self-protection check
+// (writes to the guard's own files), never by the secret-path rules — so
+// `cp .env.example .env` keeps working. Split by whether their non-flag
+// arguments are all destinations (rm/touch/tee) or source…destination
+// (cp/mv/install, where only the LAST path is being written).
+const WRITE_CAPABLE_VERBS = new Set(["rm", "tee", "touch", "dd", "truncate", "shred", "ln"])
+// mv additionally UNLINKS its sources (a removal-shaped tamper vector).
+const MOVE_LIKE_VERBS = new Set(["mv"])
+const COPY_LIKE_VERBS = new Set(["cp", "install", "rsync"])
 // For openssl, only classify tokens that follow explicit INPUT flags —
 // bare positionals are usually outputs (-keyout/-out), which keeps
 // certificate/key GENERATION workflows working.
@@ -614,7 +718,7 @@ const OPENSSL_INPUT_FLAGS = new Set(["-in", "-inkey", "-CAkey", "-certfile", "-p
 // The trailing lookahead prevents partial extraction like ".env" out of
 // ".env.example" (dot counts as a continuation character here).
 const EMBEDDED_PATH_RE =
-  /[\w./~@-]*\.(?:env|pem|key|p12|pfx|jks|keystore|tfstate|netrc|npmrc|pypirc|pub)(?![\w.-])|[\w./~@-]*(?:id_rsa|id_ed25519|id_ecdsa|id_dsa|authorized_keys|git-credentials|auth\.json|kubeconfig)(?![\w.-])|\.[A-Za-z0-9@_-]*(?:ssh|aws|azure|kube|gnupg|config[/\\]secrets)[\w./@-]*/gi
+  /[\w.\/~@-]*\.(?:env|pem|key|p12|pfx|jks|keystore|tfstate|netrc|npmrc|pypirc|pub)(?![\w.-])|[\w.\/~@-]*(?:id_rsa|id_ed25519|id_ecdsa|id_dsa|authorized_keys|git-credentials|auth\.json|kubeconfig)(?![\w.-])|[\w.\/~@-]*\.(?:zshenv|zshrc|zprofile|zlogin|bashrc|bash_profile|bash_login|kshrc)(?![\w.-])|\.[A-Za-z0-9@_-]*(?:ssh|aws|azure|kube|gnupg|config[/\\]secrets)[\w.\/@-]*/gi
 
 /** Split a command into top-level segments on ; && || | and newlines,
  *  respecting single/double quotes and $()/backticks shallowly. */
@@ -697,11 +801,25 @@ export function tokenize(segment) {
   return toks
 }
 
+/**
+ * Remove every shell quoting artifact from a word, the way the kernel sees it:
+ * quote characters are metacharacters (not content) and backslash escapes one
+ * character. Without this, `cat .e''nv`, `cat .e"nv"` and `cat .e\nv` all open
+ * `.env` while the guard previously classified a different string.
+ *
+ * Windows-style paths (drive letters, UNC) keep their backslashes: there
+ * shell-escape semantics do not apply on this platform's threat surface.
+ */
+export function shellDequote(tok) {
+  const s = String(tok)
+  if (/^[A-Za-z]:[\\/]|^\\\\/.test(s)) return s.replace(/['"]/g, "")
+  return s.replace(/\\(.)/gs, "$1").replace(/['"]/g, "")
+}
+
 /** Strip surrounding quotes and a trailing/leading redirection char. */
 export function normalizePathToken(tok) {
   if (!tok) return ""
-  let t = String(tok).trim()
-  t = t.replace(/^['"]|['"]$/g, "")
+  let t = shellDequote(String(tok).trim())
   t = t.replace(/^[<>]+/, "").trim()
   // curl-style inline-file syntax (--data @file, -F name=@file)
   t = t.replace(/^.*?=@/, "@")
@@ -729,21 +847,21 @@ function assignmentValue(tok) {
 function looksLikePath(tok) {
   if (/^(\.|\/|~)/.test(tok)) return true
   if (tok.includes("/")) return true
-  if (/^[A-Za-z0-9_.@-]+$/.test(tok) && /\.(env|pem|key|p12|pfx|jks|keystore|tfstate|pub)$/.test(tok)) return true
-  if (/^\.(env|netrc|npmrc|pypirc|git-credentials|zsh|bash)/.test(tok)) return true
+  if (/^[A-Za-z0-9_.@-]+$/.test(tok) && /\.(env|pem|key|p12|pfx|jks|keystore|tfstate|pub)$/i.test(tok)) return true
+  if (/^\.(env|netrc|npmrc|pypirc|git-credentials|zsh|bash)/i.test(tok)) return true
   return false
 }
 
 function varRefs(tok) {
-  // ${NAME} and $NAME (simple identifiers only)
+  // ${NAME}, $NAME and bash indirect expansion ${!NAME} / $!NAME
   const out = []
-  for (const m of String(tok).matchAll(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)/g)) {
-    out.push(m[1] ?? m[2])
+  for (const m of String(tok).matchAll(/\$\{!?\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}|\$!([A-Za-z_][A-Za-z0-9_]*)|\$([A-Za-z_][A-Za-z0-9_]*)/g)) {
+    out.push(m[1] ?? m[2] ?? m[3])
   }
   return out
 }
 
-/** Extract inner text of $( ... ) and ` ... ` substitutions. */
+/** Extract inner text of $( ... ) and all ` ... ` substitutions. */
 function substitutions(segment) {
   const out = []
   let i = 0
@@ -761,10 +879,12 @@ function substitutions(segment) {
     out.push(s.slice(i + 2, j))
     i = j
   }
-  const bt = s.indexOf("`")
-  if (bt !== -1) {
+  // Every backtick pair, not just the first.
+  for (let bt = s.indexOf("`"); bt !== -1; ) {
     const end = s.indexOf("`", bt + 1)
-    if (end !== -1) out.push(s.slice(bt + 1, end))
+    if (end === -1) break
+    out.push(s.slice(bt + 1, end))
+    bt = s.indexOf("`", end + 1)
   }
   return out
 }
@@ -783,19 +903,95 @@ function isSecretEnvName(policy, name) {
 }
 
 /**
+ * Extract the inner command string carried by a re-entry wrapper invocation.
+ * Returns "" when the wrapper has no analyzable payload (e.g. plain `make`).
+ */
+export function wrapperInnerCommand(verb, args) {
+  const clean = (s) => shellDequote(s)
+  if (SHELL_REEXEC_VERBS.has(verb)) {
+    // `-c` may be bundled with other single-letter options (-fc, -lc, -ic, -xc).
+    for (let i = 0; i < args.length; i++) {
+      const a = clean(args[i])
+      if (/^-[A-Za-z]*c$/.test(a)) return i + 1 < args.length ? clean(args[i + 1]) : ""
+    }
+    return ""
+  }
+  if (verb === "eval" || verb === "exec") {
+    // eval concatenates ALL its arguments into one command line.
+    return args.map(clean).join(" ")
+  }
+  if (verb === "xargs") {
+    // xargs builds a command from its arguments plus stdin; only the visible
+    // part can be analyzed (`xargs -a list cat` stays a documented blind spot).
+    const rest = []
+    for (let i = 0; i < args.length; i++) {
+      const a = clean(args[i])
+      if (a.startsWith("-")) {
+        if (/^-[A-Za-z]$/.test(a) && PREFIX_FLAG_WITH_VALUE.has(a)) i++
+        continue
+      }
+      rest.push(a)
+    }
+    return rest.join(" ")
+  }
+  if (COMMAND_PREFIX_VERBS.has(verb)) {
+    const rest = []
+    let i = 0
+    // Leading VAR=value assignments belong to env(1)'s environment, not its command.
+    for (; i < args.length; i++) {
+      const a = clean(args[i])
+      if (isAssignment(a)) continue
+      if (a === "--") {
+        i++
+        break
+      }
+      if (a.startsWith("-")) {
+        if (/^-[A-Za-z]$/.test(a) && PREFIX_FLAG_WITH_VALUE.has(a)) i++
+        continue
+      }
+      break
+    }
+    for (; i < args.length; i++) rest.push(clean(args[i]))
+    return rest.join(" ")
+  }
+  return ""
+}
+
+/** Split a `git` argument list, skipping global flags, into its subcommand. */
+function gitSubcommand(args) {
+  const valueFlags = new Set(["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--super-prefix"])
+  for (let i = 0; i < args.length; i++) {
+    const a = String(args[i])
+    if (a === "--") return String(args[i + 1] ?? "")
+    if (valueFlags.has(a)) {
+      i++
+      continue
+    }
+    if (a.startsWith("-")) continue
+    return a
+  }
+  return ""
+}
+
+/**
  * Analyze one command string against the policy.
  * Returns null (no opinion) or {decision:"block"|"ask", ruleId, category, reason, matched}.
  * `matched` contains a SAFE excerpt: a basename or variable NAME — never
  * values, never full paths into the user's home, never raw command text.
+ * opts._depth bounds re-entry wrapper recursion (wrapper payloads are analyzed
+ * as commands, which can themselves contain wrappers).
  */
 export function analyzeCommand(policy, command, opts = {}) {
+  const depth = opts._depth ?? 0
   const promote = opts.promoteAskToDenyIds ?? policy.promoteAskToDenyIds ?? []
   const assignments = {} // simple single-level indirection support
   const copies = [] // temp-copy provenance: cp .env /tmp/x => /tmp/x inherits .env's tier
 
   // Classify a token, falling back to inherited tiers from tracked copies.
-  const classifyToken = (tok) => {
-    const cls = classifyPath(policy, tok, { promoteAskToDenyIds: promote })
+  // `mode` ("write" for segments that create/replace files) enables the
+  // guard's self-protection rules.
+  const classifyToken = (tok, mode = opts.mode) => {
+    const cls = classifyPath(policy, tok, { promoteAskToDenyIds: promote, mode })
     if (cls.tier !== "pass") return cls
     // Symlink/alias defense: a benign-named path may resolve onto protected
     // material. Reclassify the resolved target when a resolver is provided.
@@ -803,7 +999,7 @@ export function analyzeCommand(policy, command, opts = {}) {
       try {
         const real = opts.resolvePath(tok)
         if (real && real !== tok) {
-          const rcls = classifyPath(policy, real, { promoteAskToDenyIds: promote })
+          const rcls = classifyPath(policy, real, { promoteAskToDenyIds: promote, mode })
           if (rcls.tier !== "pass") return { ...rcls, viaResolution: true }
         }
       } catch {}
@@ -820,7 +1016,7 @@ export function analyzeCommand(policy, command, opts = {}) {
 
     // Recurse into command/process substitutions first.
     for (const sub of substitutions(rawSeg)) {
-      const r = analyzeCommand(policy, sub, { promoteAskToDenyIds: promote, resolvePath: opts.resolvePath })
+      const r = analyzeCommand(policy, sub, { ...opts, _depth: depth + 1 })
       if (r) {
         return { ...r, category: r.category + "+substitution" }
       }
@@ -842,6 +1038,30 @@ export function analyzeCommand(policy, command, opts = {}) {
 
     const verb = basenameOf(words[0]).toLowerCase()
     const args = words.slice(1)
+
+    // ---- re-entry wrappers: analyze the payload as a command ----------------
+    if (depth < 4) {
+      const inner = wrapperInnerCommand(verb, args)
+      if (inner && inner.trim() !== String(rawSeg).trim()) {
+        const r = analyzeCommand(policy, inner, { ...opts, _depth: depth + 1 })
+        if (r) return { ...r, category: r.category + "+wrapper" }
+      }
+    }
+
+    // ---- alias definitions: the VALUE becomes a command on every later use ---
+    // Closes the single-pass blind spot for `alias rc='cat .zshenv'` by
+    // analyzing the alias body at definition time. (`unalias` and multi-line
+    // function bodies remain invisible — documented residual.)
+    if (verb === "alias") {
+      for (const a of args) {
+        const body = shellDequote(String(a))
+        if (!isAssignment(body) || body.startsWith("-")) continue
+        const payload = body.slice(body.indexOf("=") + 1)
+        if (!payload.trim()) continue
+        const r = analyzeCommand(policy, payload, { ...opts, _depth: depth + 1 })
+        if (r) return { ...r, category: r.category + "+alias-definition" }
+      }
+    }
 
     // ---- environment dumps -------------------------------------------------
     if (ENV_DUMP_VERBS.has(verb) && args.length === 0) {
@@ -887,14 +1107,13 @@ export function analyzeCommand(policy, command, opts = {}) {
         INTERPRETERS.has(verb) ||
         /\b(python3?|node|ruby|perl|php|deno|bun)\b/.test(rawSeg)
       if (interpish) {
-        const secretLiteral = rawSeg.match(
-          /\b[A-Z_]*(?:TOKEN|SECRET|PASSWORD|PASSWD|API_?KEY|PRIVATE_KEY|ACCESS_KEY|CLIENT_SECRET|CREDENTIALS?|AUTH)[A-Z0-9_]*\b/
-        )
+        const candidates = rawSeg.match(/\b[A-Z][A-Z0-9_]{2,}\b/g) ?? []
+        const secretLiteral = candidates.find((n) => isSecretEnvName(policy, n))
         if (secretLiteral) {
           return {
             decision: "block", ruleId: "GGE-VAR-020", category: "environment-dump",
             reason: "interpreter code reads a secret-named environment variable",
-            matched: secretLiteral[0],
+            matched: secretLiteral,
           }
         }
         return {
@@ -927,20 +1146,40 @@ export function analyzeCommand(policy, command, opts = {}) {
       // Non-printing/non-sending use (e.g. passing to build tools): allow.
     }
 
-    // ---- path classification over tokens (incl. one-level indirection) -----
+    // ---- path classification over tokens (incl. chained indirection) --------
     const classified = []
     const seenTokens = new Set()
-    const considerToken = (t, opts2 = {}) => {
+    // Resolve an assignment value, following name→name chains (bounded):
+    // covers plain multi-hop (`A=B; B=.env; cat $A`) and bash indirect
+    // expansion (`A=B; B=.env; cat ${!A}`) which both expand to protected names.
+    const resolveAssigned = (name) => {
+      let val = assignments[name]
+      let hops = 0
+      while (val && /^[A-Za-z_][A-Za-z0-9_]*$/.test(val) && assignments[val] && hops++ < 4) {
+        val = assignments[val]
+      }
+      return val
+    }
+    const considerToken = (t, opts2 = {}, cDepth = 0) => {
+      if (cDepth > 5) return
       for (const v of varRefs(t)) {
-        if (assignments[v]) considerToken(assignments[v])
+        const val = resolveAssigned(v)
+        if (val) considerToken(val, opts2, cDepth + 1)
+      }
+      // $IFS used AS a word separator: `cat$IFS.env` runs `cat .env`.
+      if (/\$IFS\}?$/.test(t) || t.includes("$IFS")) {
+        for (const piece of t.split(/\$\{?IFS\}?/)) {
+          if (piece) considerToken(piece, opts2, cDepth + 1)
+        }
+        return
       }
       let cand = normalizePathToken(t)
       if (opts2.opensslInputOnly) {
         // handled by caller via flag pairs; skip generic consideration
         return
       }
-      cand = cand.replace(/^\$\{?[A-Za-z_][A-Za-z0-9_]*\}?/, "")
-      if (!cand || /\$\{?[A-Za-z_]/.test(cand)) return
+      cand = cand.replace(/^\$\{!?[A-Za-z_][A-Za-z0-9_]*\}?/, "")
+      if (!cand || /\$\{!?[A-Za-z_]/.test(cand)) return
       // Symlink/alias defense: when a resolver is available, benign-named
       // tokens may still resolve onto protected files, so attempt resolution
       // BEFORE the shape gates reject the token.
@@ -1000,6 +1239,70 @@ export function analyzeCommand(policy, command, opts = {}) {
       if (flagVal) {
         const cls = classifyToken(normalizePathToken(flagVal))
         if (cls.tier !== "pass") classified.push({ token: basenameOf(normalizePathToken(flagVal)), ...cls, explicit: true })
+      }
+    }
+
+    // ---- guard self-protection: writes onto the guard's own files ----------
+    // Triggered by output redirection (`>`, `>>`, `2>`) targets and by
+    // write-capable verbs taking the path as an argument. Reads are never
+    // flagged: auditing the guard must stay possible.
+    {
+      const outTargets = []
+      for (let i = 0; i < toks.length; i++) {
+        const d = unquote(toks[i])
+        const m = d.match(/^[0-9]*>>?(.*)$/)
+        if (!m) continue
+        const inline = normalizePathToken(m[1])
+        outTargets.push(inline || (toks[i + 1] ? normalizePathToken(unquote(toks[i + 1])) : ""))
+      }
+      // Verbs that take the path as an argument. For copy/move shapes the
+      // SOURCE is a read (backing up the policy file is routine), so only
+      // verbs whose non-flag arguments are all destinations count as writes;
+      // cp/mv/install/rsync are handled by their destination pass below.
+      if (WRITE_CAPABLE_VERBS.has(verb)) {
+        for (const w of args) {
+          const t = normalizePathToken(String(w).replace(/^(?:of|out)=/i, ""))
+          if (t && !t.startsWith("-")) outTargets.push(t)
+        }
+      }
+      if (MOVE_LIKE_VERBS.has(verb)) {
+        // mv UNLINKS its sources: `mv plugin/security-guard.js /tmp/x` disarms
+        // the guard by removal, so every non-flag argument counts as a target.
+        for (const w of args) {
+          const t = normalizePathToken(w)
+          if (t && !t.startsWith("-")) outTargets.push(t)
+        }
+      } else if (COPY_LIKE_VERBS.has(verb)) {
+        // last non-flag argument is the destination
+        for (let i = args.length - 1; i >= 0; i--) {
+          const t = normalizePathToken(args[i])
+          if (t && !t.startsWith("-")) {
+            outTargets.push(t)
+            break
+          }
+        }
+      }
+      // `sed -i` edits in place: treat file operands as write targets.
+      if (verb === "sed" && args.some((a) => /^-[A-Za-z]*i/.test(String(a)))) {
+        for (const w of args) {
+          const t = normalizePathToken(w)
+          if (t && !t.startsWith("-")) outTargets.push(t)
+        }
+      }
+      for (const cand of outTargets) {
+        if (!cand) continue
+        const self = classifySelfProtect(policy, cand)
+        if (self) {
+          return {
+            decision: self.tier === "deny" ? "block" : "ask",
+            ruleId: self.ruleId,
+            category: self.category,
+            reason: self.reason,
+            matched: basenameOf(cand),
+          }
+        }
+        // Redirection INTO a high-confidence secret file (creating your own
+        // .env) is normal setup; only guard-owned paths are blocked here.
       }
     }
 
@@ -1070,7 +1373,7 @@ export function analyzeCommand(policy, command, opts = {}) {
       if (ARCHIVE_CREATORS.has(verb)) {
         return verdict(hit, "GGA-PACK-001", "archive creation includes protected material", hit.token)
       }
-      if (verb === "git" && GIT_CONTENT_SUBCOMMANDS.has(args[0])) {
+      if (verb === "git" && GIT_CONTENT_SUBCOMMANDS.has(gitSubcommand(args))) {
         return verdict(hit, "GGG-GIT-001", "git object/history access may expose protected material committed earlier", hit.token)
       }
       // Generic: a protected path touched by something unrecognized. Deny-tier
@@ -1189,6 +1492,7 @@ export function mcpArgumentVerdicts(policy, input, promote, opts = {}) {
   for (const [k, v] of Object.entries(input ?? {})) collect(v, k)
 
   for (const [, value] of strings) {
+    let hitPath = false
     const norm = normalizePathToken(value)
     if (norm && looksLikePath(norm)) {
       // Symlink/alias defense: classify the literal path AND its resolved
@@ -1203,6 +1507,7 @@ export function mcpArgumentVerdicts(policy, input, promote, opts = {}) {
       }
       const cls = classifyPathVariants(policy, candidates, { promoteAskToDenyIds: promote })
       if (cls.tier !== "pass") {
+        hitPath = true
         out.push({
           decision: "block", // arg-layer has no prompt channel
           ruleId: cls.tier === "deny" ? "MCP-ARG-PATH-001" : "MCP-ARG-PATH-002",
@@ -1211,7 +1516,40 @@ export function mcpArgumentVerdicts(policy, input, promote, opts = {}) {
           matched: basenameOf(norm),
           pathRule: cls.ruleId,
         })
-        continue
+      }
+    }
+    // Same embedded scan the shell engine uses: protected references can hide
+    // inside a longer string (`cd /srv/app && cat .env`, JSON payloads, URLs
+    // ending in credential filenames) instead of being the whole argument.
+    if (!hitPath) {
+      for (const m of String(value).matchAll(EMBEDDED_PATH_RE)) {
+        const cls = classifyPath(policy, m[0], { promoteAskToDenyIds: promote })
+        if (cls.tier === "pass") continue
+        out.push({
+          decision: "block",
+          ruleId: cls.tier === "deny" ? "MCP-ARG-PATH-001" : "MCP-ARG-PATH-002",
+          category: "mcp-protected-path",
+          reason: (cls.tier === "deny" ? cls.reason : "approval-gated: " + cls.reason) + " (embedded in an argument)",
+          matched: basenameOf(m[0]),
+          pathRule: cls.ruleId,
+        })
+        break
+      }
+    }
+    // Guard self-protection: an MCP filesystem-style tool pointed at the
+    // guard's own files is the same tamper vector as a shell write.
+    if (!hitPath && norm) {
+      const self = classifySelfProtect(policy, norm)
+      if (self) {
+        out.push({
+          decision: "block",
+          ruleId: self.ruleId,
+          category: "guard-self-protection",
+          reason: self.reason,
+          matched: basenameOf(norm),
+          pathRule: self.ruleId,
+        })
+        hitPath = true
       }
     }
     // Secret-named VALUE detection — deliberately narrow to avoid flagging
@@ -1323,9 +1661,24 @@ export function normalizeToolCall(tool, input = {}) {
       kind: "path",
       path: input.filePath ?? input.path ?? input.file_path,
       mode: t === "read" ? "read" : "write",
+      // Written body, when the tool delivers one (write/patch-style tools).
+      content:
+        typeof input.content === "string"
+          ? input.content
+          : typeof input.newString === "string"
+            ? input.newString
+            : undefined,
     }
   }
   return { kind: "other" }
+}
+
+/** Tools whose payload is a script the agent is about to place on disk. */
+const SCRIPT_EXT_RE = /\.(sh|bash|zsh|ksh|fish|py|rb|pl|php|js|mjs|cjs|ts|expect)$/i
+
+/** True when written content looks like something an interpreter will run. */
+function looksLikeScript(path, content) {
+  return SCRIPT_EXT_RE.test(String(path ?? "")) || /^#!.*\b(sh|bash|zsh|python[0-9.]*|node|ruby|perl|php|env)\b/.test(String(content ?? "").slice(0, 64))
 }
 
 /** Decide on a normalized tool call. Returns null (no opinion) or a verdict. */
@@ -1343,8 +1696,29 @@ export function decideToolCall(policy, toolCall, opts = {}) {
           if (real && real !== toolCall.path) candidates.push(real)
         } catch {}
       }
-      const cls = classifyPathVariants(policy, candidates, { promoteAskToDenyIds: policy.promoteAskToDenyIds ?? [] })
-      if (cls.tier === "pass") return null
+      const cls = classifyPathVariants(policy, candidates, {
+        promoteAskToDenyIds: policy.promoteAskToDenyIds ?? [],
+        mode: toolCall.mode,
+      })
+      if (cls.tier === "pass") {
+        // Writing a SCRIPT that references protected material is the
+        // write-a-file-then-run-it shape: the guard cannot see script bodies
+        // at execution time, so this is the only choke point that can. Ask —
+        // never block — because scripts legitimately mention .env paths.
+        if (toolCall.mode === "write" && looksLikeScript(toolCall.path, toolCall.content)) {
+          const hits = embeddedProtectedHits(policy, toolCall.content)
+          if (hits.length) {
+            return {
+              decision: "ask",
+              ruleId: "GGW-CONTENT-001",
+              category: "deferred-execution",
+              reason: "script content references protected material the guard cannot inspect when the script later runs",
+              matched: hits[0],
+            }
+          }
+        }
+        return null
+      }
       if (toolCall.mode === "write" && cls.tier === "ask") {
         return { decision: "ask", ruleId: cls.ruleId, category: "approval-required", reason: "writing to " + cls.reason, matched: basenameOf(toolCall.path) }
       }
@@ -1398,7 +1772,18 @@ export function decidePermissionEvent(policy, action, resources, opts = {}) {
       continue
     }
     if (action === "read" || action === "edit") {
-      const cls = classifyPath(policy, String(res))
+      const mode = action === "edit" ? "write" : "read"
+      const candidates = [String(res)]
+      if (typeof opts.resolvePath === "function") {
+        try {
+          const real = opts.resolvePath(String(res))
+          if (real && real !== res) candidates.push(String(real))
+        } catch {}
+      }
+      const cls = classifyPathVariants(policy, candidates, {
+        mode,
+        promoteAskToDenyIds: policy.promoteAskToDenyIds ?? [],
+      })
       if (cls.tier === "deny") {
         return { decision: "block", ruleId: cls.ruleId, category: cls.category, reason: cls.reason, matched: basenameOf(res) }
       }
@@ -1605,10 +1990,15 @@ export default {
 
     // Symlink/alias defense: resolve on-disk targets so benign-named links
     // onto protected material are classified by what they really are.
+    // `~` is expanded first — realpathSync does not understand it, so without
+    // this the whole defense silently no-opped on the most common path form.
     const resolvePath = (p) => {
       try {
         if (typeof p !== "string" || !p) return null
-        return realpathSync(p)
+        const expanded =
+          p === "~" ? homedir() : p.startsWith("~/") ? path.join(homedir(), p.slice(2)) : p
+        if (!expanded) return null
+        return realpathSync(expanded)
       } catch {
         return null
       }

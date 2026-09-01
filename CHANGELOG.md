@@ -6,6 +6,79 @@ All notable changes. Format: Keep a Changelog; versioning: semantically ordered 
 
 Nothing yet.
 
+## 0.3.0 — 2026-09-01
+
+Circumvention-focused release: the classes an LLM could use to walk around
+Layer 4 without ever touching a denied path. Every item below was confirmed as
+a live bypass against the v0.2 engine before being fixed, and each now has a
+corpus entry in `tests/bypass/cases.jsonc`.
+
+### Fixed — bypass classes
+
+- **Case-insensitive filesystems.** The path classifier compared case, while
+  APFS/NTFS do not: `cat .ENV`, `cat ID_RSA`, `cat ~/.SSH/config` all read the
+  secret unnoticed. Classification now folds case (documented cost: `FOO.PEM`
+  on ext4 gets asked about). Closes `BYP-CAS-001..005`.
+- **Shell quoting artifacts.** `cat .e''nv`, `cat .e"nv"` and `cat .e\nv` reach
+  `.env` in the kernel but classified as different filenames. Tokens are now
+  shell-normalized (quotes removed, backslash escapes collapsed) before
+  classification. Closes `BYP-QTE-001..004`.
+- **Re-entry wrappers.** `bash -c`, `sh -lc`, `eval`, `env CMD`, `sudo`, `nohup`,
+  `time`, `watch`, `xargs`, `command` and friends hid the real verb, so printer,
+  sender and environment-dump rules never fired (`bash -c 'echo $AWS_SECRET…'`
+  was silent). Wrapper payloads are now analyzed as commands, recursively, with
+  a depth bound. Closes `BYP-WRP-001..007`.
+- **Deeper indirection.** Bash indirect expansion (`${!A}`) and `$IFS`-as-separator
+  (`cat$IFS.env`) are resolved; multi-hop assignment chains are followed.
+- **Git global flags.** `git -C repo show HEAD:.zshenv` hid the subcommand behind
+  `-C`; subcommand detection now skips global flags and their values.
+- **Script bodies at write time.** Writing `deploy.sh` containing `cat .env` was
+  fully invisible, and executing it later references only a benign filename.
+  Write-content scanning now raises a single approval at the one moment the body
+  is visible (`GGW-CONTENT-001`, ask-only).
+- **Symlink resolution for `~/` paths.** `realpathSync` does not expand tilde, so
+  the symlink defense silently no-opped on the most common path form. Home
+  expansion happens before resolution, and the read/edit permission channel now
+  resolves too (it previously classified literals only).
+- **MCP argument depth.** Protected references embedded inside longer argument
+  strings (`"cd /srv/app && cat .env"`) are now caught by the same scan the
+  shell engine uses, and MCP writes onto guard-owned files are blocked.
+- **Alias definitions.** `alias rc='cat .zshenv'` was a *documented* blind spot;
+  alias bodies are now analyzed at definition time (`unalias` and function
+  bodies remain invisible — see limitations).
+
+### Added — guard self-protection
+
+- New `selfProtectPaths` policy class (`GG-SLF-*`): writes to
+  `security-guard.config.json` and the heartbeat file are denied, writes to the
+  plugin source and `policy.jsonc` require approval; **reads stay free** so the
+  guard remains auditable. Mirrored as native Layer-1 rules (`SG-WRT-008..011`)
+  so it holds even without the plugin loaded. Write-shaped tamper is caught
+  across edit/write tools, `>`/`>>` redirections, `rm`, `tee`, `dd of=`,
+  `cp`/`install`/`rsync` destinations, `mv` sources *and* destinations
+  (removal-shaped tamper — `mv plugin.js /tmp/x` — found during post-
+  implementation review and closed before release), and `sed -i`. Ordinary
+  renames and in-place edits of non-guard files stay silent.
+- `doctor.mjs` treats a non-`active` heartbeat as a **failure** (was a warning),
+  verifies the recorded pid is a live process, and warns on stale heartbeats.
+- `security-test.mjs` covers the new classes plus a self-protection false-positive
+  check; heartbeat phase is now asserted, not just reported.
+- Interpreter secret-variable detection (`GGE-VAR-020`) derives from
+  `envVarNamePattern` instead of a hardcoded copy that could drift from policy.
+
+### Changed
+
+- Native rule count 69 → 73; test suite 163 → 210; corpus 60 → 82 cases.
+- Transformer verb list extended (`base32`, `uuencode`, compressors); all
+  backtick substitutions are extracted, not just the first pair.
+
+### Still not guaranteed
+
+Case-folding adds false positives, not coverage: interpreter string
+obfuscation (`open(chr(46)+'env')`), stdin-delivered filenames, function bodies,
+and arbitrary binaries remain out of reach for a one-pass command heuristic. No
+network egress control ships. See [docs/limitations.md](docs/limitations.md).
+
 ## 0.2.0 — 2026-08-26
 
 MCP connector security, external-testing hardening, and the tooling that lets users verify their own installations. Supersedes `v0.2.0-rc.1` (identical scope plus the hardening items below). Targets **OpenCode V2 (`opencode2`)**; verified against betas `0.0.0-beta-18219`, `0.0.0-beta-18230`, and `0.0.0-beta-18269`.

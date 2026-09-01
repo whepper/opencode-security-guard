@@ -67,7 +67,8 @@ This project does not protect against:
 - secrets already exposed before deployment of these controls;
 - side channels in general (timing, cache, crash dumps…);
 - complete MCP protection — connector-specific policy is an explicit future milestone ([mcp.md](mcp.md));
-- alias/function indirection invisible to one-pass command analysis (documented corpus case `BYP-IND-006`).
+- function indirection beyond alias definitions (`f() { cat .env; }; f`) — invisible to one-pass command analysis;
+- interpreter string obfuscation (`open(chr(46)+'env')`) and `$'\x2e…'` ANSI-C quoting;
 
 ## Posture statement
 

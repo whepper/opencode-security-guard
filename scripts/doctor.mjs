@@ -119,9 +119,28 @@ section("Plugin liveness (heartbeat)")
   if (existsSync(hb)) {
     try {
       const h = JSON.parse(readFileSync(hb, "utf8"))
-      const ageH = (Date.now() - Date.parse(h.time)) / 3600e3
+      const ageMin = (Date.now() - Date.parse(h.time)) / 60e3
+      const ageH = ageMin / 60
       ok(`heartbeat phase=${h.phase} version=${h.version} opencode=${h.opencode ?? "?"} age=${ageH < 1 ? "<1" : Math.round(ageH)}h pid=${h.pid}`)
-      if (h.phase !== "active") warn(`heartbeat phase is "${h.phase}" (setup did not complete cleanly?)`)
+      // A non-active phase means setup() died partway: the hooks this check
+      // exists to verify were never registered. That is a fail, not a warning.
+      if (h.phase !== "active") bad(`heartbeat phase is "${h.phase}" — setup did not complete; the guard is NOT enforcing`)
+      // Liveness of the recorded pid: a heartbeat from a dead process proves
+      // nothing about the currently running service.
+      if (Number.isInteger(h.pid)) {
+        let alive = true
+        try {
+          process.kill(h.pid, 0)
+        } catch {
+          alive = false
+        }
+        if (!alive) bad(`heartbeat pid ${h.pid} is not a running process — stale or hand-written heartbeat`)
+      } else {
+        warn("heartbeat carries no pid")
+      }
+      // Freshness: an old heartbeat plus a live-but-different service is the
+      // silent-fail-open shape the heartbeat exists to detect.
+      if (ageMin > 24 * 60) warn(`heartbeat is ${Math.round(ageH)}h old — start an OpenCode session and re-run to confirm liveness`)
     } catch (e) {
       bad(`heartbeat unreadable: ${e.message}`)
     }

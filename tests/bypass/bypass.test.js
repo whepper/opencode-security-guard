@@ -37,6 +37,8 @@ for (const c of cases) {
       command: c.input.command,
       pattern: c.input.pattern,
       path: c.input.path ?? c.input.filePath,
+      content: c.input.content,
+      mode: c.input.filePath || c.input.path ? (c.tool === "read" ? "read" : "write") : undefined,
     })
     const verdict = norm ? norm.decision : null
     const want = c.expect // "block" | "ask" | null

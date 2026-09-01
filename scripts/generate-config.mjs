@@ -127,6 +127,7 @@ function renderGuardBlob(policy, profileName) {
     denyPaths: g.denyPaths,
     askPaths: g.askPaths,
     exceptionPaths: g.exceptionPaths,
+    selfProtectPaths: g.selfProtectPaths ?? [],
     promoteAskToDenyIds: strict.promoteAskToDenyIds ?? [],
     envVarNamePattern: g.envVarNamePattern,
     mcp: policy.mcp ?? {},

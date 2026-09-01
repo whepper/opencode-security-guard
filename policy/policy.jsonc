@@ -161,6 +161,14 @@
       "reason": "The dedicated secret store is agent-immutable by policy." },
     { "id": "SG-WRT-007", "action": "edit", "resource": "*terraform.tfstate*", "effect": "deny",
       "reason": "Corrupting/hand-editing live infra state is destructive; reads already denied by SG-IAC-001." },
+    { "id": "SG-WRT-008", "action": "edit", "resource": "*security-guard.config.json", "effect": "deny",
+      "reason": "Self-protection: the guard's runtime override file. Writing it is how an agent silently weakens the guard." },
+    { "id": "SG-WRT-009", "action": "edit", "resource": "*opencode-security-guard/health.json", "effect": "deny",
+      "reason": "Self-protection: the guard heartbeat file. A forged health.json disables fail-open detection. (Scoped to the file name so repository paths are unaffected.)" },
+    { "id": "SG-WRT-010", "action": "edit", "resource": "*security-guard.js", "effect": "ask",
+      "reason": "Self-protection: editing the guard plugin itself is legitimate only during guard development." },
+    { "id": "SG-WRT-011", "action": "edit", "resource": "*policy/policy.jsonc", "effect": "ask",
+      "reason": "Self-protection: the policy source of truth; derived artifacts regenerate from it." },
 
     // ---- 3. Approval tier: ambiguous resources -------------------------------
     // Deliberately NOT blanket asks on every filename containing a keyword —
@@ -399,6 +407,18 @@
       { "id": "GG-EXC-001", "form": "prefixName", "value": ".env.", "suffixes": [".example", ".sample", ".template"], "reason": "sanitized templates" },
       { "id": "GG-EXC-002", "form": "suffix", "value": ".pub", "reason": "public key material" },
       { "id": "GG-EXC-003", "form": "contains", "value": "tokenizer", "reason": "ML tokenizer configuration, not tokens" }
+    ],
+
+    // Self-protection: the guard's own attack surface. `effect` is enforced on
+    // WRITE-class operations (edit/write/patch tools, shell file management);
+    // reads of these paths are additionally covered by deny/ask tiers as given.
+    // Without this, an agent could rewrite security-guard.config.json (weakening
+    // MCP trust), the heartbeat store (forging liveness), or the plugin itself.
+    "selfProtectPaths": [
+      { "id": "GG-SLF-001", "form": "basename", "value": "security-guard.config.json", "effect": "deny", "reason": "guard runtime override file — writing it is how a guard gets silently weakened" },
+      { "id": "GG-SLF-002", "form": "basename", "value": "health.json", "withinDir": "opencode-security-guard", "effect": "deny", "reason": "guard heartbeat file — a forged heartbeat disables fail-open detection" },
+      { "id": "GG-SLF-003", "form": "basename", "value": "security-guard.js", "effect": "ask", "reason": "guard plugin source — legitimate during development, a tamper vector everywhere else" },
+      { "id": "GG-SLF-004", "form": "basename", "value": "policy.jsonc", "effect": "ask", "reason": "policy source of truth" }
     ],
 
     // Environment-variable NAME pattern (JS RegExp source, applied

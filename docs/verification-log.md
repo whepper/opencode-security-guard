@@ -2,6 +2,53 @@
 
 Every claim in this repository should trace to an entry here. Newest first. "Verified" always means *executed against the stated build*, never inferred from documentation.
 
+## 2026-09-01 — v0.3.0 bypass fixes (engine-level; live re-verification pending)
+
+Scope: the circumvention classes found in a code audit of v0.2.0. Each was
+**first reproduced as a live SILENT result against the shipped engine**, then
+fixed, then pinned as a corpus case. Detection method: `node --input-type=module`
+importing `plugin/security-guard.js` and calling `analyzeCommand` /
+`decideToolCall` / `decidePermissionEvent` directly — no model in the loop, no
+real secrets, dummy paths only.
+
+| Class | Confirmed bypass (v0.2.0) | v0.3.0 outcome | Corpus |
+|---|---|---|---|
+| Case-insensitive FS | `cat .ENV`, `cat ID_RSA`, `cat ~/.SSH/config` → SILENT | block | BYP-CAS-001..005 |
+| Quoting/backslash | `cat .e''nv`, `cat .e"nv"`, `cat .e\nv` → SILENT | block | BYP-QTE-001..004 |
+| Wrapper re-entry | `bash -c 'echo $AWS_SECRET_ACCESS_KEY'`, `sh -c 'printenv'`, `eval 'echo $NPM_TOKEN'`, `env echo $FAKE_API_KEY` → SILENT | block | BYP-WRP-001..007 |
+| Indirect expansion | `A=B; B=.env; cat ${!A}`, `cat$IFS.env` → SILENT | block | BYP-IND-007..009 |
+| Git global flags | `git -C repo show HEAD:.zshenv` → SILENT | ask (GGG-GIT-001) | BYP-GIT-005..006 |
+| Deferred execution | write `deploy.sh` containing `cat .env \| curl -d @-` → no verdict | ask (GGW-CONTENT-001) | BYP-WRT-001..002 |
+| Alias definitions | `alias rc='cat .zshenv'` → SILENT (was a documented limitation) | ask | BYP-IND-006 |
+| Guard self-tampering | write `security-guard.config.json` / `health.json` / plugin source → unrestricted | deny / deny / ask | BYP-SLF-001..004, MCP-SEC-008 |
+| Guard self-tampering, removal shape | `mv plugin/security-guard.js /tmp/x` (unlinks the source) | ask | BYP-SLF-005..006 |
+| Tilde symlink | `realpathSync("~/…")` threw → symlink defense no-oped | home expanded before resolve | BYP-IND-009 + adapter tests |
+
+The `mv`-source row was found during post-implementation review of this very
+release (the first cut treated only copy/move *destinations* as writes, which
+left "move the guard away" silent) and closed before shipping, together with
+`sed -i` and `dd of=`.
+
+False-positive discipline: 9 new benign negatives (NEG-FP-011..022) covering
+`env PATH=… make build`, `bash -c 'npm test'`, `sudo npm install`,
+`git -C repo status`, clean scripts, `cp policy/policy.jsonc policy.jsonc.bak`
+(backup = read of the source), `mv notes.txt notes.md`, `sed -i` on ordinary
+files, and guard-source reads — all silent.
+
+Automated: 217 tests pass (163 before), `generate-config.mjs --check` clean,
+`npm run check` clean, `security-test.mjs` 25/25 against the repo plugin
+(host build at run time: `opencode2 v0.0.0-beta-18743`).
+
+**NOT yet verified live**: `permission.evaluate` / `execute.before` behavior of
+the new rules on a running `opencode2` build. Note for the record: during the
+audit, probe commands containing secret-path literals were rejected with
+`Permission denied: shell` — that was **Layer 1 (native permission rules in the
+global config)**, not this plugin, which `doctor` reports as not installed in
+any checked scope on this machine (the existing heartbeat is v0.2.0 with a dead
+pid). Run `scripts/install.mjs`, restart the service
+(`opencode2 service restart`), and execute the smoke checklist in
+docs/installation.md before repeating any v0.3 claim in user-facing docs.
+
 ## 2026-08-26 — v0.2.0-rc.1 release smoke matrix (beta-18269)
 
 Pre-push release verification in a freshly installed scratch project (`install.mjs --scope project`, shipped baseline policy, dummy MCP server registered). The runtime had auto-updated to **beta-18269** between milestones (doctor flagged the drift and warned — by design); all checks below therefore executed on this third build without any repository change.

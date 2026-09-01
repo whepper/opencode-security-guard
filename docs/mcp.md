@@ -20,7 +20,7 @@ Verified on `opencode2` beta-18230 (and native-tool paths identically on beta-18
 | --- | --- |
 | Layer 1 — native permissions | Per-tool `<server>_<tool>` rules (deny survives saved approvals). The generator mirrors explicit policy denies as native rules so they hold even if the plugin is absent. |
 | Layer 4a — guard, permission channel | Trust × class defaults and explicit tool rules escalate `allow → ask/deny`; asks become real prompts (auto-rejected headlessly). Arguments are not visible on this channel. |
-| Layer 4b — guard, tool channel | Argument-level analysis where inputs ARE visible: protected-path tiers reuse the filesystem classifier; secret-named value shapes are flagged. Deny-tier hits hard-block; approval-tier hits block with a pointer to allowlisting (same no-prompt-channel trade-off as grep/glob). |
+| Layer 4b — guard, tool channel | Argument-level analysis where inputs ARE visible: protected-path tiers reuse the filesystem classifier (case-folded, shell-normalized) — including protected references EMBEDDED inside longer argument strings (`"cd /srv/app && cat .env"`) — plus resolved-symlink escalation and guard self-protection on write-shaped arguments; secret-named value shapes are flagged. Deny-tier hits hard-block; approval-tier hits block with a pointer to allowlisting (same no-prompt-channel trade-off as grep/glob). |
 | Layer 4c — provenance experiment | Opt-in tripwire: results of approval-gated calls are sampled; later arguments embedding that content are blocked. A heuristic, never a guarantee. |
 | Layers 2–3 | Watcher exclusions don't apply to remote servers; AGENTS.md guidance demonstrably steers models away from misuse but remains advisory. |
 

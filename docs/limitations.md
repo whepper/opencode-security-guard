@@ -7,7 +7,7 @@ Read this page as the honest price list of the design.
 If `plugin/security-guard.js` throws while loading, OpenCode logs a WARN and continues **without Layer 4** (verified on beta-18219). Nothing in V2 lets a plugin make its own absence fatal. Mitigations, not solutions:
 
 - the plugin writes a heartbeat file before anything else;
-- `scripts/doctor.mjs --live` fails loudly when the heartbeat is missing/stale or logs show load failures;
+- `scripts/doctor.mjs --live` fails loudly when the heartbeat is missing/stale, when its phase is not `active` (setup died partway → hooks unregistered), or when the recorded pid is not a running process;
 - **run the doctor after every OpenCode upgrade** — beta APIs change.
 
 ## Network egress is uncontrolled
@@ -16,15 +16,42 @@ No firewall, proxy, or namespace isolation ships here. A secret that reached con
 
 ## Command analysis is heuristic, not parsing
 
-The engine tokenizes and pattern-matches; it does not implement a shell grammar. Known blind spots (each has a corpus entry or rationale in `tests/bypass/cases.jsonc`):
+The engine tokenizes and pattern-matches; it does not implement a shell grammar. v0.3 closed the confirmed classes (case variants, quote/backslash artifacts, re-entry wrappers, indirect expansion, `$IFS` separators, git global flags, alias definitions — each pinned by corpus cases), and each fix was verified as a live bypass first. What remains (each with a corpus entry or rationale in `tests/bypass/cases.jsonc`):
 
-- aliases and functions (`alias rc='cat .zshenv'; rc`) — invisible to one-pass analysis;
-- deep indirection beyond one variable hop or one copy hop;
-- scripts on disk whose *content* is never visible to the guard;
-- heredoc bodies, exotic encodings, custom tools with unknown verbs;
-- unknown verbs touching protected names ask only on explicit credential flags, otherwise stay silent — deliberate false-positive control that trades coverage.
+- **string-obfuscated filenames inside interpreter code** — `open(chr(46)+'env')`, hex/unicode escapes, runtime concatenation: no literal ever appears in the argument list;
+- **`$'\x2e…'` ANSI-C quoting**, which decodes escapes the shell understands but the normalizer does not;
+- **function bodies** (`f() { cat .env; }; f`) and `unalias`, which define behavior beyond a single assignment value;
+- **filenames arriving through stdin** (`xargs -I{} sh -c 'base64 {}' < list`) — pinned as `BYP-WRP-008` so the residual is asserted, not assumed;
+- **heredoc bodies** and custom tools with unknown verbs;
+- **scripts that already exist on disk**, or arrive via `git pull`/package install: the v0.3 write-content check sees content only at the moment the agent writes it, never afterwards;
+- **unknown verbs touching protected names** ask only on explicit credential flags, otherwise stay silent — deliberate false-positive control that trades coverage;
+- **case-folding false positives on Linux**: `FOO.PEM` is a different file than `foo.pem` there, and gets asked about anyway. Accepted: the alternative is a universal bypass on macOS/Windows.
 
 New bypass shapes belong in the corpus first, then the engine.
+
+## The guard can be weakened only by a human, not by the agent
+
+The guard's own files are attack surface: rewriting `security-guard.js`, its
+`security-guard.config.json` override, `policy.jsonc`, or the heartbeat JSON
+would disarm or falsify Layer 4. v0.3 gates these (`GG-SLF-*` in the guard,
+`SG-WRT-008..011` natively): writes to the override file and heartbeat are
+denied, writes to plugin/policy sources require explicit approval, and **reads
+stay unrestricted** so the guard can always be audited.
+
+Honest limits: this raises the tamper bar from "any tool call" to "a human must
+approve an obviously suspicious edit, or the user's own shell must be trusted
+not to edit files outside OpenCode." It also means guard development produces
+approval prompts on purpose — that friction is the control working.
+
+Write-shaped tamper is covered for the paths an agent actually uses: edit/write
+tools, `>` / `>>` redirections, `rm`, `tee`, `dd of=`, `cp`/`install`/`rsync`
+destinations, `mv` in **both** directions (its destination *and* the sources it
+unlinks), and `sed -i`. What is *not* covered is any write that does not name a
+guard file in an observable argument: an interpreter that assembles the path at
+runtime (`open(os.path.expanduser("~/.con" "fig/opencode/plu" "gins/" + name)`,
+`'w')`) is the interpreter-obfuscation class above, and out-of-band edits made
+by the user or by software outside OpenCode are outside the model's threat
+surface by definition.
 
 ## Ask-tier depends on humans
 

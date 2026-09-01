@@ -1,6 +1,6 @@
 {
   "name": "opencode-security-guard",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "description": "Defense-in-depth security controls for OpenCode V2: reduce the risk that an LLM coding agent reads, exposes, modifies, or transmits sensitive local data.",
   "type": "module",

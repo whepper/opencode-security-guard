@@ -79,6 +79,14 @@ test("guard path rules use known forms and unique IDs", () => {
       assert.ok(rule.reason, `${rule.id} needs rationale`)
     }
   }
+  // Self-protection rules carry an explicit write-effect; anything else would
+  // silently default to deny and could lock the user out of their own files.
+  for (const rule of policy.guard.selfProtectPaths ?? []) {
+    assert.ok(!ids.has(rule.id) && ids.add(rule.id), `duplicate guard id ${rule.id}`)
+    assert.ok(forms.has(rule.form), `unknown form ${rule.form} on ${rule.id}`)
+    assert.ok(["deny", "ask"].includes(rule.effect), `selfProtect rule ${rule.id} must declare effect deny|ask`)
+    assert.ok(rule.reason, `${rule.id} needs rationale`)
+  }
 })
 
 test("envVarNamePattern compiles and matches obvious secret names only", () => {
