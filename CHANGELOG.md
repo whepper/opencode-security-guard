@@ -6,6 +6,17 @@ All notable changes. Format: Keep a Changelog; versioning: semantically ordered 
 
 Nothing yet.
 
+## 0.3.1 — 2026-09-02
+
+### Fixed — false-positive reduction
+
+- **Multi-dot identifiers no longer trigger GG-KEY-002.** Bare strings with three
+  or more dot-separated segments and no path separators (e.g.
+  `discvault.backup.b2.key`) are naming conventions (BWS secrets, reverse-domain
+  identifiers, Java packages), not file paths. `looksLikePath` and `formMatches`
+  now both skip suffix matching for these. Single- and double-dot bare names
+  (`server.key`, `my.backup.key`) and slashed paths remain fully protected.
+
 ## 0.3.0 — 2026-09-01
 
 Circumvention-focused release: the classes an LLM could use to walk around

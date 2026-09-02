@@ -448,7 +448,7 @@ export const GENERATED_GUARD_POLICY = Object.freeze({
 })
 // ==== END GENERATED GUARD POLICY ====
 
-export const PLUGIN_VERSION = "0.3.0"
+export const PLUGIN_VERSION = "0.3.1"
 export const PLUGIN_ID = "security-guard"
 
 // ============================================================================
@@ -526,7 +526,19 @@ function formMatches(form, path) {
         !(form.exceptSuffixes ?? []).some((s) => base.endsWith(s))
       )
     case "suffix":
-      return base.endsWith(form.value)
+      if (base.endsWith(form.value)) {
+        // Multi-dot bare identifiers (>=3 dots, e.g. discvault.backup.b2.key)
+        // are naming conventions, not file paths. Skip suffix matching so
+        // rules like GG-KEY-002 (.key) don't flag BWS secret names, reverse-
+        // domain identifiers, etc. Single- and double-dot names remain
+        // protected (server.key, backup.key, my.bootstrap.pem).
+        if (!path.includes("/") && !/^[.\/~]/.test(path)) {
+          const dotCount = (base.match(/\./g) || []).length
+          if (dotCount >= 3) return false
+        }
+        return true
+      }
+      return false
     case "contains":
       return String(path).toLowerCase().includes(String(form.value).toLowerCase())
     case "dir":
@@ -847,7 +859,14 @@ function assignmentValue(tok) {
 function looksLikePath(tok) {
   if (/^(\.|\/|~)/.test(tok)) return true
   if (tok.includes("/")) return true
-  if (/^[A-Za-z0-9_.@-]+$/.test(tok) && /\.(env|pem|key|p12|pfx|jks|keystore|tfstate|pub)$/i.test(tok)) return true
+  if (
+    /^[A-Za-z0-9_.@-]+$/.test(tok) &&
+    /\.(env|pem|key|p12|pfx|jks|keystore|tfstate|pub)$/i.test(tok) &&
+    // Multi-dot bare identifiers (≥3 dots, e.g. discvault.backup.b2.key) are
+    // naming conventions (BWS, reverse-domain, Java), not file paths. Single-
+    // and double-dot names (server.key, backup.key) remain valid path shapes.
+    ((tok.match(/\./g) || []).length <= 2)
+  ) return true
   if (/^\.(env|netrc|npmrc|pypirc|git-credentials|zsh|bash)/i.test(tok)) return true
   return false
 }
