@@ -307,6 +307,15 @@ test("bash indirect expansion and $IFS separators are resolved", () => {
   block("cat $HOME/./sub/../.env")
 })
 
+test("git commit/tag -m with .env-like text is not blocked (FP prevention)", () => {
+  passes('git commit -m "discvault.env"')
+  passes('git commit -m "production.env deployment"')
+  passes('git tag -m "release discvault.env v1.0" v1.0')
+  // git content access of .env is still blocked
+  block("git show HEAD:.env")
+  block("git log -p -- .env")
+})
+
 test("git global flags no longer hide the subcommand", () => {
   asks("git -C repo show HEAD:.zshenv")
   block("git --no-pager log -p -- .env")

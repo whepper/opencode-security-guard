@@ -6,6 +6,15 @@ All notable changes. Format: Keep a Changelog; versioning: semantically ordered 
 
 Nothing yet.
 
+## 0.3.2 — 2026-09-02
+
+### Fixed — false-positive reduction
+
+- **`git commit -m` / `git tag -m` with `.env`-like message text no longer blocks.**
+  A path-shaped token inside a commit or tag message (e.g. `discvault.env`) is
+  narrative prose, not a file reference — `-m` values are now excluded from path
+  classification.
+
 ## 0.3.1 — 2026-09-02
 
 ### Fixed — false-positive reduction

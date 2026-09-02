@@ -448,7 +448,7 @@ export const GENERATED_GUARD_POLICY = Object.freeze({
 })
 // ==== END GENERATED GUARD POLICY ====
 
-export const PLUGIN_VERSION = "0.3.1"
+export const PLUGIN_VERSION = "0.3.2"
 export const PLUGIN_ID = "security-guard"
 
 // ============================================================================
@@ -1363,6 +1363,17 @@ export function analyzeCommand(policy, command, opts = {}) {
       const cls = classifyToken(normalizePathToken(toks[redirIdx + 1]))
       if (cls.tier !== "pass") {
         classified.push({ token: basenameOf(normalizePathToken(toks[redirIdx + 1])), ...cls })
+      }
+    }
+
+    // ---- git commit/tag -m: skip path classification on narrative text -----
+    // Commit and tag messages are human-readable prose, not file references.
+    // A path-like token in a message (e.g. "discvault.env") is coincidental:
+    // it names a runtime config file without referencing secret material.
+    if (verb === "git") {
+      const sub = gitSubcommand(args)
+      if ((sub === "commit" || sub === "tag") && args.some(a => a === "-m" || a === "--message")) {
+        classified.length = 0
       }
     }
 
