@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Doctor — verify that OpenCode Security Guard is actually installed, loaded,
+ * Doctor — verify that Security Guard for OpenCode is actually installed, loaded,
  * and consistent. Run after EVERY OpenCode upgrade.
  *
  *   node scripts/doctor.mjs [--live] [--scope project|global|auto]
@@ -115,7 +115,19 @@ if (foundPlugin) {
 section("Plugin liveness (heartbeat)")
 {
   const dataHome = process.env.XDG_DATA_HOME || path.join(homedir(), ".local", "share")
-  const hb = path.join(dataHome, "opencode-security-guard", "health.json")
+  const OLD_DATA_DIR = path.join(dataHome, "opencode-security-guard")
+  const NEW_DATA_DIR = path.join(dataHome, "security-guard-for-opencode")
+
+  // Check for un-migrated old data directory
+  if (existsSync(OLD_DATA_DIR)) {
+    if (existsSync(NEW_DATA_DIR)) {
+      warn(`old data directory (${OLD_DATA_DIR}) still exists alongside the new one — remove manually: rm -rf "${OLD_DATA_DIR}"`)
+    } else {
+      warn(`heartbeat found at old location (${OLD_DATA_DIR}) — re-run install.mjs to migrate or move manually to ${NEW_DATA_DIR}`)
+    }
+  }
+
+  const hb = path.join(NEW_DATA_DIR, "health.json")
   if (existsSync(hb)) {
     try {
       const h = JSON.parse(readFileSync(hb, "utf8"))
@@ -255,7 +267,7 @@ section("MCP configuration")
 if (live) {
   section("Live log scan (~/.local/share/opencode/log)")
   const dataHome = process.env.XDG_DATA_HOME || path.join(homedir(), ".local", "share")
-  const hbPath = path.join(dataHome, "opencode-security-guard", "health.json")
+  const hbPath = path.join(dataHome, "security-guard-for-opencode", "health.json")
   let cutoff = Date.now() - 24 * 3600e3
   try {
     const hbTime = JSON.parse(readFileSync(hbPath, "utf8")).time

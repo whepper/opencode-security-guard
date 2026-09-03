@@ -334,7 +334,7 @@ test("guard self-protection: writes are gated, reads stay free", () => {
   passes("mv notes.txt notes.md")
   passes("sed -i 's/foo/bar/' src/app.js")
   passes("sed -n '1,5p' plugin/security-guard.js")
-  const w = decideToolCall(P, { kind: "path", path: "/Users/dummy/.local/share/opencode-security-guard/health.json", mode: "write" })
+  const w = decideToolCall(P, { kind: "path", path: "/Users/dummy/.local/share/security-guard-for-opencode/health.json", mode: "write" })
   assert.equal(w.decision, "block")
   assert.match(w.ruleId, /GG-SLF/)
   assert.equal(decideToolCall(P, { kind: "path", path: "plugin/security-guard.js", mode: "read" }), null)

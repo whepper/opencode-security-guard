@@ -2,6 +2,36 @@
 
 All notable changes. Format: Keep a Changelog; versioning: semantically ordered pre-releases.
 
+## 0.4.0 — 2026-09-03
+
+### Changed — project renamed to Security Guard for OpenCode
+
+The repository has been renamed from `opencode-security-guard` to `security-guard-for-opencode` and the display name from "OpenCode Security Guard" to "**Security Guard for OpenCode**". This applies to:
+
+- **Runtime data directory**: `~/.local/share/opencode-security-guard/` → `~/.local/share/security-guard-for-opencode/`
+- **npm package name**: `opencode-security-guard` → `security-guard-for-opencode`
+- **Documentation**: all headers, descriptions, and path references across README, SECURITY.md, docs, scripts, and tests
+- **Native permission rules**: `*opencode-security-guard/health.json` → `*security-guard-for-opencode/health.json`
+- **Guard self-protection**: `withinDir: "opencode-security-guard"` → `withinDir: "security-guard-for-opencode"`
+
+### Added — automated migration path
+
+- `scripts/install.mjs` now auto-migrates the old runtime data directory to the new name on install (rename, not copy).
+- `scripts/doctor.mjs` warns if the old data directory is found (either as a leftover alongside the new one, or as the only location).
+
+### Migration from v0.3.x
+
+Existing installations upgrading to v0.4.0 need two steps:
+
+1. **Re-run the installer** so the plugin and config are replaced with the new paths: `node scripts/install.mjs --scope project --merge --yes` (or `--scope global`).
+2. **Restart the service**: `opencode2 service restart && node scripts/doctor.mjs --live`
+
+The installer handles the data directory migration automatically. If you prefer to do it manually: `mv ~/.local/share/opencode-security-guard ~/.local/share/security-guard-for-opencode`.
+
+See `docs/installation.md#upgrading-from-v03x-to-v040` for details.
+
+---
+
 ## 0.3.3 — 2026-09-03
 
 ### Added — MCP per-tool overrides in `security-guard.config.json`

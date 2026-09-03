@@ -53,7 +53,7 @@ test("setup registers hooks and writes an active heartbeat", async () => {
   await securityGuard.setup(ctx)
   assert.ok(hooks["execute.before"])
   assert.ok(hooks["perm:evaluate"])
-  const hbPath = path.join(dataHome, "opencode-security-guard", "health.json")
+  const hbPath = path.join(dataHome, "security-guard-for-opencode", "health.json")
   const hb = JSON.parse(readFileSync(hbPath, "utf8"))
   assert.equal(hb.phase, "active")
   assert.equal(hb.plugin, "security-guard")

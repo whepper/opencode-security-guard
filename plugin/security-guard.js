@@ -1,5 +1,5 @@
 /**
- * OpenCode Security Guard — execution-time guard plugin (Layer 4).
+ * Security Guard for OpenCode — execution-time guard plugin (Layer 4).
  *
  * Platform: OpenCode V2 (opencode2). Verified against 0.0.0-beta-18219:
  *   - plugins are ESM modules whose DEFAULT EXPORT is an OBJECT
@@ -292,7 +292,7 @@ export const GENERATED_GUARD_POLICY = Object.freeze({
       "id": "GG-SLF-002",
       "form": "basename",
       "value": "health.json",
-      "withinDir": "opencode-security-guard",
+      "withinDir": "security-guard-for-opencode",
       "effect": "deny",
       "reason": "guard heartbeat file — a forged heartbeat disables fail-open detection"
     },
@@ -1969,7 +1969,7 @@ import path from "node:path"
 
 function heartbeatPath() {
   const dataHome = process.env.XDG_DATA_HOME || path.join(homedir(), ".local", "share")
-  return path.join(dataHome, "opencode-security-guard", "health.json")
+  return path.join(dataHome, "security-guard-for-opencode", "health.json")
 }
 
 function writeHeartbeat(extra = {}) {

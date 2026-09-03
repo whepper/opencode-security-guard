@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Uninstall OpenCode Security Guard from a scope, safely.
+ * Uninstall Security Guard for OpenCode from a scope, safely.
  *
  *   node scripts/uninstall.mjs --scope project|global [--yes]
  *

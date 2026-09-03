@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Safe installer for OpenCode Security Guard (OpenCode V2 only).
+ * Safe installer for Security Guard for OpenCode (OpenCode V2 only).
  *
  *   node scripts/install.mjs --scope project [--yes]
  *   node scripts/install.mjs --scope global [--yes]
@@ -137,7 +137,32 @@ if (!yes) {
   process.exit(0)
 }
 
-// --- 5. backup ----------------------------------------------------------------------
+// --- 5. migrate old data directory ---------------------------------------------------
+// In v0.3.x and earlier the runtime data lived at ~/.local/share/opencode-security-guard/.
+// This was renamed to security-guard-for-opencode. Move it so existing installs keep
+// their heartbeat continuity and doctor checks continue to work.
+const OLD_DATA_DIRNAME = "opencode-security-guard"
+const NEW_DATA_DIRNAME = "security-guard-for-opencode"
+const dataHome = process.env.XDG_DATA_HOME || path.join(homedir(), ".local", "share")
+const oldDataDir = path.join(dataHome, OLD_DATA_DIRNAME)
+const newDataDir = path.join(dataHome, NEW_DATA_DIRNAME)
+
+if (existsSync(oldDataDir) && !existsSync(newDataDir)) {
+  say("")
+  say(`NOTICE: old runtime data directory found at ${oldDataDir}`)
+  say(`        It will be moved to ${newDataDir} to match the renamed project.`)
+  say("")
+  // Do the migration now, before backup (backup is for config files, not data dirs).
+  // A simple rename is safe because both paths are on the same filesystem.
+  execFileSync("mv", [oldDataDir, newDataDir])
+  say(`migrated ${oldDataDir} → ${newDataDir}`)
+} else if (existsSync(oldDataDir) && existsSync(newDataDir)) {
+  say("")
+  say(`NOTE: old data directory (${oldDataDir}) still exists alongside the new one.`)
+  say(`      Remove it manually if no longer needed: rm -rf "${oldDataDir}"`)
+}
+
+// --- 7. backup ----------------------------------------------------------------------
 const stamp = new Date().toISOString().replace(/[:.]/g, "-")
 const backupDir = path.join(cfgDir, `security-guard-backup-${stamp}`)
 mkdirSync(backupDir, { recursive: true })
@@ -147,7 +172,7 @@ for (const step of plan) {
   }
 }
 
-// --- 6. apply -------------------------------------------------------------------------
+// --- 8. apply -------------------------------------------------------------------------
 for (const step of plan) {
   if (step.op === "mkdir") mkdirSync(step.path, { recursive: true })
   else if (step.text !== undefined) writeFileSync(step.path, step.text)
@@ -155,7 +180,7 @@ for (const step of plan) {
   say(`wrote ${step.path}`)
 }
 
-// --- 7. verify + rollback instructions --------------------------------------------------
+// --- 9. verify + rollback instructions --------------------------------------------------
 say("")
 say("Backup directory:")
 say(`  ${backupDir}`)

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * security-test — reproducible safety checks for an OpenCode Security Guard
+ * security-test — reproducible safety checks for a Security Guard for OpenCode
  * installation. Designed for EXTERNAL users preparing bug reports.
  *
  *   node scripts/security-test.mjs [--plugin <path>] [--json]
@@ -137,7 +137,7 @@ if (!pluginPath || !existsSync(pluginPath)) {
 // --- heartbeat (informational) -------------------------------------------------
 {
   const dataHome = process.env.XDG_DATA_HOME || path.join(homedir(), ".local", "share")
-  const hb = path.join(dataHome, "opencode-security-guard", "health.json")
+  const hb = path.join(dataHome, "security-guard-for-opencode", "health.json")
   if (existsSync(hb)) {
     try {
       const h = JSON.parse(readFileSync(hb, "utf8"))

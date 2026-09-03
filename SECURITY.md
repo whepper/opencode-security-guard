@@ -2,7 +2,7 @@
 
 ## Scope
 
-OpenCode Security Guard is security-sensitive software whose entire purpose is reducing exposure of local secrets to LLM agents. A vulnerability includes:
+Security Guard for OpenCode is security-sensitive software whose entire purpose is reducing exposure of local secrets to LLM agents. A vulnerability includes:
 
 - a bypass that defeats a documented control (permission rule, guard detection);
 - a false-negative class the docs claim is covered;

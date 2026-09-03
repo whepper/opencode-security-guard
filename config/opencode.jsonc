@@ -150,7 +150,7 @@
     // SG-WRT-008: Self-protection: the guard's runtime override file. Writing it is how an agent silently weakens the guard.
     { "action": "edit", "resource": "*security-guard.config.json", "effect": "deny" },
     // SG-WRT-009: Self-protection: the guard heartbeat file. A forged health.json disables fail-open detection. (Scoped to the file name so repository paths are unaffected.)
-    { "action": "edit", "resource": "*opencode-security-guard/health.json", "effect": "deny" },
+    { "action": "edit", "resource": "*security-guard-for-opencode/health.json", "effect": "deny" },
     // SG-WRT-010: Self-protection: editing the guard plugin itself is legitimate only during guard development.
     { "action": "edit", "resource": "*security-guard.js", "effect": "ask" },
     // SG-WRT-011: Self-protection: the policy source of truth; derived artifacts regenerate from it.

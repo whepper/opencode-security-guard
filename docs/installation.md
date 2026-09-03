@@ -109,6 +109,40 @@ node scripts/doctor.mjs --live
 
 Re-run the smoke checklist when doctor warns about a version mismatch.
 
+## Upgrading from v0.3.x to v0.4.0
+
+Version 0.4.0 renames the project from `opencode-security-guard` to `security-guard-for-opencode`. The runtime data directory changes accordingly: `~/.local/share/opencode-security-guard/` → `~/.local/share/security-guard-for-opencode/`.
+
+To upgrade an existing installation:
+
+```sh
+node scripts/install.mjs --scope project --merge --yes   # or --scope global
+opencode2 service restart
+node scripts/doctor.mjs --live
+```
+
+The installer will:
+
+1. Replace the plugin at `plugins/security-guard.js` and the config at `opencode.jsonc` with the new paths;
+2. **Automatically migrate** the heartbeat data directory from the old name to the new one;
+3. Preserve any unrelated config keys you may have (`--merge`).
+
+If you prefer to migrate manually:
+
+```sh
+# 1. Move the heartbeat data directory
+mv ~/.local/share/opencode-security-guard ~/.local/share/security-guard-for-opencode
+
+# 2. Reinstall the plugin and config
+node scripts/install.mjs --scope project --merge --yes
+
+# 3. Activate
+opencode2 service restart
+node scripts/doctor.mjs --live
+```
+
+> **Note for manual installs (no installer):** Update your config's permission rule from `"*opencode-security-guard/health.json"` to `"*security-guard-for-opencode/health.json"`, and move the data directory manually as shown above.
+
 ## Rollback
 
 Every install prints per-file restore commands using its timestamped backup directory:

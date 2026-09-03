@@ -1,5 +1,5 @@
 // ============================================================================
-// OpenCode Security Guard — single source of truth for security policy.
+// Security Guard for OpenCode — single source of truth for security policy.
 //
 // This file is the ONLY hand-maintained policy. Everything else is derived:
 //   * config/opencode.jsonc        <- scripts/generate-config.mjs (Layer 1 + 2)
@@ -163,7 +163,7 @@
       "reason": "Corrupting/hand-editing live infra state is destructive; reads already denied by SG-IAC-001." },
     { "id": "SG-WRT-008", "action": "edit", "resource": "*security-guard.config.json", "effect": "deny",
       "reason": "Self-protection: the guard's runtime override file. Writing it is how an agent silently weakens the guard." },
-    { "id": "SG-WRT-009", "action": "edit", "resource": "*opencode-security-guard/health.json", "effect": "deny",
+    { "id": "SG-WRT-009", "action": "edit", "resource": "*security-guard-for-opencode/health.json", "effect": "deny",
       "reason": "Self-protection: the guard heartbeat file. A forged health.json disables fail-open detection. (Scoped to the file name so repository paths are unaffected.)" },
     { "id": "SG-WRT-010", "action": "edit", "resource": "*security-guard.js", "effect": "ask",
       "reason": "Self-protection: editing the guard plugin itself is legitimate only during guard development." },
@@ -416,7 +416,7 @@
     // MCP trust), the heartbeat store (forging liveness), or the plugin itself.
     "selfProtectPaths": [
       { "id": "GG-SLF-001", "form": "basename", "value": "security-guard.config.json", "effect": "deny", "reason": "guard runtime override file — writing it is how a guard gets silently weakened" },
-      { "id": "GG-SLF-002", "form": "basename", "value": "health.json", "withinDir": "opencode-security-guard", "effect": "deny", "reason": "guard heartbeat file — a forged heartbeat disables fail-open detection" },
+      { "id": "GG-SLF-002", "form": "basename", "value": "health.json", "withinDir": "security-guard-for-opencode", "effect": "deny", "reason": "guard heartbeat file — a forged heartbeat disables fail-open detection" },
       { "id": "GG-SLF-003", "form": "basename", "value": "security-guard.js", "effect": "ask", "reason": "guard plugin source — legitimate during development, a tamper vector everywhere else" },
       { "id": "GG-SLF-004", "form": "basename", "value": "policy.jsonc", "effect": "ask", "reason": "policy source of truth" }
     ],
