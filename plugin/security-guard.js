@@ -1916,6 +1916,7 @@ export function provenanceScan(store, input) {
 
 /** Apply an optional user override (sibling security-guard.config.json):
  *  { "mcpServers": { "<name>": { "trust": "...", "reason": "..." } },
+ *    "mcpToolOverrides": { "<server>_<tool>": { "effect": "allow"|"ask"|"deny" } },
  *    "promoteAskToDeny": true|false,
  *    "provenance": { "enabled": true } }
  * Pure + exported for tests. */
@@ -1933,6 +1934,24 @@ export function applyGuardOverride(basePolicy, override) {
       : []
   } else {
     out.promoteAskToDenyIds = basePolicy.promoteAskToDenyIds ?? []
+  }
+  // Per-tool effect overrides (e.g. { "outline_update_document": { "effect": "allow" } })
+  // Format: { "<action_name>": { "effect": "allow"|"ask"|"deny", ... } }
+  // Each entry is merged into policy.mcp.tools so classifyMcpTool picks it up.
+  if (override.mcpToolOverrides && typeof override.mcpToolOverrides === "object") {
+    const existing = out.mcp.tools ?? []
+    const merged = [...existing]
+    for (const [action, entry] of Object.entries(override.mcpToolOverrides)) {
+      const underscore = action.indexOf("_")
+      if (underscore === -1) continue
+      const server = action.slice(0, underscore)
+      const tool = action.slice(underscore + 1)
+      const existingIdx = merged.findIndex((t) => t.server === server && t.tool === tool)
+      const toolEntry = { server, tool, id: `OVERRIDE-${action}`, class: "unknown", ...entry }
+      if (existingIdx >= 0) merged[existingIdx] = { ...merged[existingIdx], ...toolEntry }
+      else merged.push(toolEntry)
+    }
+    out.mcp.tools = merged
   }
   if (override.provenance && typeof override.provenance === "object") {
     out.mcp.provenance = { ...(basePolicy.mcp?.provenance ?? {}), ...override.provenance }

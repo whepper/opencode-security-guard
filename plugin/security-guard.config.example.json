@@ -1,0 +1,32 @@
+{
+  // Optional: merge per-server trust statements into the compiled policy.
+  // Values: "trusted" | "restricted" | "untrusted" | "blocked"
+  "mcpServers": {
+    // "outline": {
+    //   "trust": "trusted",
+    //   "reason": "Personal wiki — own documents only"
+    // },
+    // "github": {
+    //   "trust": "restricted",
+    //   "reason": "Read issues/PRs; writes need a prompt"
+    // }
+  },
+
+  // Optional: override the effect for specific MCP tools.
+  // Key format: "<server>_<tool>"
+  // Effect: "allow" | "ask" | "deny"
+  "mcpToolOverrides": {
+    // "outline_create_document": { "effect": "allow" },
+    // "outline_update_document": { "effect": "allow" },
+    // "outline_delete_document": { "effect": "allow" },
+    // "outline_list_documents": { "effect": "allow" }
+  },
+
+  // Optional: promote every ask-tier path rule to deny.
+  // "promoteAskToDeny": false,
+
+  // Optional: experimental provenance tracking.
+  // "provenance": {
+  //   "enabled": false
+  // }
+}

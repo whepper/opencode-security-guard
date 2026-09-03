@@ -2,9 +2,20 @@
 
 All notable changes. Format: Keep a Changelog; versioning: semantically ordered pre-releases.
 
-## Unreleased
+## 0.3.3 — 2026-09-03
 
-Nothing yet.
+### Added — MCP per-tool overrides in `security-guard.config.json`
+
+- **`mcpToolOverrides` key**: per-tool effect overrides (e.g.
+  `"outline_update_document": { "effect": "allow" }`) merged into
+  `policy.mcp.tools` at load time. Enables allowing specific write tools
+  on trusted servers without prompts, bypassing the verb-class heuristic.
+- **Example config template**: `plugin/security-guard.config.example.json`
+  with all supported keys commented out.
+- **Install guide docs**: new Configuration section in `docs/installation.md`
+  covering all override keys with a quick-reference table.
+- Documented the full `security-guard.config.json` override format in
+  `docs/mcp.md`, with a cross-reference to the example template.
 
 ## 0.3.2 — 2026-09-02
 

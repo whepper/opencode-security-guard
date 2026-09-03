@@ -59,6 +59,25 @@ Run from a scratch project that has the guard installed. Each prompt is delibera
 
 Also confirm ordinary work still flows: reading `README.md`, running tests, editing sources.
 
+## Configuration
+
+The guard reads an optional override file at startup. Create `plugin/security-guard.config.json` (next to the plugin itself, or point to it with the `$SG_CONFIG_FILE` environment variable) to tune behavior without touching the compiled policy.
+
+Supported keys — all optional:
+
+| Key | Type | Purpose |
+|---|---|---|
+| `mcpServers` | object | Per-server trust level (`"trusted"`, `"restricted"`, `"untrusted"`, `"blocked"`) |
+| `mcpToolOverrides` | object | Per-tool effect overrides — force `"allow"` / `"ask"` / `"deny"` for specific MCP tools |
+| `promoteAskToDeny` | boolean | Promote all `ask`-tier path rules to `deny` |
+| `provenance` | object | Experimental content-tracking tripwire (`{ "enabled": true }`) |
+
+Full format reference: [`docs/mcp.md`](mcp.md#override-config-security-guardconfigjson).
+
+A starter template is available at `plugin/security-guard.config.example.json` — copy it to `plugin/security-guard.config.json` and edit.
+
+> **Note:** the guard protects its own config file — writes (including by agent commands) are denied. Edit it manually.
+
 ## Uninstall
 
 ```sh

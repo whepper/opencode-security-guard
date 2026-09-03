@@ -36,6 +36,61 @@ Configured in `policy/policy.jsonc` under `mcp`:
 
 Unlisted servers run fail-conservative defaults (read/local-data/write/network/credential asks; destructive denies) rather than blanket denial — matching the project's deny-certain/ask-ambiguous philosophy.
 
+## Override config (`security-guard.config.json`)
+
+A sibling file next to the plugin (`plugin/security-guard.config.json`, or at the path in `$SG_CONFIG_FILE`) can override the compiled policy at load time. The plugin reads it once during `setup()`.
+
+A starter template with all keys commented out is at
+[`plugin/security-guard.config.example.json`](../plugin/security-guard.config.example.json).
+
+### Supported keys
+
+```jsonc
+{
+  // Per-server trust level. Merged into policy.mcp.servers.
+  // Values: "trusted" | "restricted" | "untrusted" | "blocked"
+  "mcpServers": {
+    "outline": {
+      "trust": "trusted",
+      "reason": "Personal wiki — all tools are read/write on own documents"
+    }
+  },
+
+  // Per-tool effect overrides. Each entry is split into server/tool
+  // and merged into policy.mcp.tools, which classifyMcpTool checks
+  // before verb-class heuristics. Format: "<server>_<tool>": { "effect": "..." }
+  "mcpToolOverrides": {
+    "outline_create_document": { "effect": "allow" },
+    "outline_update_document": { "effect": "allow" },
+    "outline_delete_document": { "effect": "allow" }
+  },
+
+  // Promote all ask-tier path rules to deny. Boolean.
+  "promoteAskToDeny": false,
+
+  // Provenance experiment toggle.
+  "provenance": { "enabled": false }
+}
+```
+
+All keys are optional. Unset keys leave the base policy unchanged.
+
+### When to use `mcpToolOverrides`
+
+The trusted tier allows `read-only` tools but still prompts for `external-write` and `credential-related` tools. If you trust a server for all operations (e.g. a personal wiki), use `mcpToolOverrides` to allow specific write tools without prompts.
+
+The trusted tier defaults are:
+
+| Class | Effect |
+| --- | --- |
+| `read-only` | `allow` |
+| `external-write` | **`ask`** |
+| `credential-related` | `ask` |
+| `destructive` | `deny` |
+| `unknown` | `ask` |
+
+Tool names are classified by token: `update_document` contains `update` → `external-write`; `list_documents` contains `list` → `read-only`. Use `mcpToolOverrides` to override the classification for specific tools.
+
 ## Remaining gaps (measured, not speculative)
 
 0. **No structured server/tool identity**: `ctx.mcp.list()` returned empty `data` on beta-18269 and tool events carry only the flattened `${server}_${tool}` string — so the guard must parse names (longest-known-prefix, conservative fallback). Investigated in the P0/18269 probes; if a later beta exposes structured identity, parsing should be replaced.
