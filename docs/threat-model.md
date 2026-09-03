@@ -69,6 +69,7 @@ This project does not protect against:
 - complete MCP protection — connector-specific policy is an explicit future milestone ([mcp.md](mcp.md));
 - function indirection beyond alias definitions (`f() { cat .env; }; f`) — invisible to one-pass command analysis;
 - interpreter string obfuscation (`open(chr(46)+'env')`) and `$'\x2e…'` ANSI-C quoting;
+- filenames arriving through stdin, heredoc bodies, scripts that already exist on disk, and `cp`-glob staging (file-management exempt by design — see [evasion-2026-09-04.md](evasion-2026-09-04.md) E2);
 
 ## Posture statement
 

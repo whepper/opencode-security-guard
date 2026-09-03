@@ -133,6 +133,8 @@
     { "action": "read", "resource": "*.pypirc", "effect": "deny" },
     // SG-PKG-004: git credential store: plaintext URLs with embedded passwords.
     { "action": "read", "resource": "*.git-credentials", "effect": "deny" },
+    // SG-PROC-001: procfs process environment (e.g. /proc/self/environ) exposes secrets regardless of filename; scoped to /proc/ so docs/environ.md stays allowed.
+    { "action": "read", "resource": "*proc/*environ*", "effect": "deny" },
     // SG-WRT-001: Agent must never modify SSH material (e.g. planting authorized_keys or overwriting keys).
     { "action": "edit", "resource": "*.ssh/*", "effect": "deny" },
     // SG-WRT-002: Agent must never modify cloud credential stores.
@@ -191,6 +193,8 @@
     { "action": "read", "resource": "*token*", "effect": "ask" },
     // SG-AMB-010: Ambiguous filename signal.
     { "action": "read", "resource": "*api_key*", "effect": "ask" },
+    // SG-PROC-002: procfs command lines may embed secrets; scoped to /proc/ to avoid flagging project files.
+    { "action": "read", "resource": "*proc/*cmdline*", "effect": "ask" },
     // SG-EXC-001: Sanitized template by strong convention; explicitly permitted by project goals.
     { "action": "read", "resource": "*.env.example", "effect": "allow" },
     // SG-EXC-002: Sanitized template variant.

@@ -146,6 +146,9 @@
     { "id": "SG-PKG-004", "action": "read", "resource": "*.git-credentials", "effect": "deny",
       "reason": "git credential store: plaintext URLs with embedded passwords." },
 
+    { "id": "SG-PROC-001", "action": "read", "resource": "*proc/*environ*", "effect": "deny",
+      "reason": "procfs process environment (e.g. /proc/self/environ) exposes secrets regardless of filename; scoped to /proc/ so docs/environ.md stays allowed." },
+
     // Writes into never-legitimate-to-modify stores (edit covers edit/write/patch)
     { "id": "SG-WRT-001", "action": "edit", "resource": "*.ssh/*", "effect": "deny",
       "reason": "Agent must never modify SSH material (e.g. planting authorized_keys or overwriting keys)." },
@@ -211,6 +214,9 @@
       "reason": "Ambiguous filename signal; tokenizer_* files are re-allowed by SG-EXC-005." },
     { "id": "SG-AMB-010", "action": "read", "resource": "*api_key*", "effect": "ask",
       "reason": "Ambiguous filename signal." },
+
+    { "id": "SG-PROC-002", "action": "read", "resource": "*proc/*cmdline*", "effect": "ask",
+      "reason": "procfs command lines may embed secrets; scoped to /proc/ to avoid flagging project files." },
 
     // ---- 4. Safe exceptions — MUST remain the final section ------------------
     // Last-match-wins makes these override everything above. Adding rules
@@ -386,7 +392,8 @@
       { "id": "GG-PKG-002", "form": "basename", "value": ".npmrc", "reason": "may carry _authToken" },
       { "id": "GG-PKG-003", "form": "basename", "value": ".pypirc", "reason": "PyPI credentials" },
       { "id": "GG-PKG-004", "form": "basename", "value": ".git-credentials", "reason": "git credential store" },
-      { "id": "GG-MISC-001", "form": "basename", "value": "auth.json", "reason": "generic auth store" }
+      { "id": "GG-MISC-001", "form": "basename", "value": "auth.json", "reason": "generic auth store" },
+      { "id": "GG-PROC-001", "form": "withinDir", "value": "environ", "withinDir": "proc", "reason": "procfs process environment exposes secrets regardless of filename (scoped to /proc/ so docs/environ.md stays allowed)" }
     ],
 
     // Approval-gated paths: dangerous enough to interrupt, ambiguous enough
@@ -399,7 +406,8 @@
       { "id": "GG-RC-005", "form": "basename", "value": ".bashrc", "reason": "shell startup file" },
       { "id": "GG-RC-006", "form": "basename", "value": ".bash_profile", "reason": "shell startup file" },
       { "id": "GG-RC-007", "form": "basename", "value": ".profile", "reason": "shell startup file" },
-      { "id": "GG-AMB-011", "form": "contains", "value": "kubeconfig", "reason": "cluster credential file outside the standard ~/.kube directory" }
+      { "id": "GG-AMB-011", "form": "contains", "value": "kubeconfig", "reason": "cluster credential file outside the standard ~/.kube directory" },
+      { "id": "GG-PROC-002", "form": "withinDir", "value": "cmdline", "withinDir": "proc", "reason": "procfs command lines may embed secrets (scoped to /proc/)" }
     ],
 
     // Safe re-allows evaluated AFTER denyPaths/askPaths in the engine.

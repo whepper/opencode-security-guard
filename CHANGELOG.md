@@ -2,6 +2,39 @@
 
 All notable changes. Format: Keep a Changelog; versioning: semantically ordered pre-releases.
 
+## 0.4.1 — 2026-09-04 evasion set (E1–E10, FP-safe)
+
+Implements `docs/evasion-2026-09-04.md`. Engine-level verified (`npm test`
+266 pass, `npm run check` clean); live smoke on a running `opencode2` build
+still pending before user-facing claims are repeated.
+
+### Fixed — bypass classes (ask-where-uncertain, block-where-certain)
+
+- **Glob/pattern expansion (E1).** `cat .e*`, `cat .[e]nv`, `cat *key`,
+  `for f in .e*; do cat $f; done`, `find -name '.e*' …` now `ask GGR-GLOB-001`
+  via exemplar matching; `*.log`/`*.js` stay silent (`NEG-FP-023`).
+- **Cross-call temp copies (E2).** Bounded session store (32-entry FIFO,
+  `createCopyProvenanceStore` + `detectCopyTracks`, populated post-execution,
+  cleared on `rm`/overwrite); consumers mirror single-command verdicts
+  (`GGN-SEND-001`/`GGR-READ-001`, `GGR-COPY-001` for read/grep tools).
+- **Directory-operand archives (E3).** Broad-root creation asks
+  (`GGA-DIR-001`); extraction and `dist/` stay silent.
+- **Bare history / full-tree git (E4).** Patch-displaying bare access asks
+  (`GGG-HIST-001`); `--stat`/`--oneline`/`--` stay silent.
+- **Broad-root recursive search (E5).** Narrow `ask GGR-SEARCH-001`;
+  scoped `src/`/`docs/` stays silent.
+- **procfs environment (E6).** `GG-PROC-001` deny (`environ`) + native
+  `*proc/*environ*` deny, `GG-PROC-002` ask (`cmdline`) + native ask;
+  `docs/environ.md` stays silent by `/proc/` scoping. Native rules 73 → 75.
+- **Bare dumps (E7).** `export`/`declare`/`readonly`/`local` bare and
+  flag-only forms block (`GGE-DUMP-004/005`); `compgen -e/-v/-A variable`
+  blocks (`GGE-DUMP-006`); assignments and `compgen -c` stay silent.
+- **Parameter expansion (E8).** `${VAR:-x}`/`${VAR:+x}`/`${#VAR}` etc.
+  resolve to the secret name (`GGE-VAR`); `${PATH:-x}` stays silent.
+- **Ask-tier viewers (E9).** `bat`/`batcat`/`delta`/`tac`/`rev` read
+  (`bat ~/.zshenv` asks); `ls`/`stat` stay silent.
+- **Glob discovery (E10).** `glob **/.zshenv` asks; `**/*.log` stays silent.
+
 ## 0.4.0 — 2026-09-03
 
 ### Changed — project renamed to Security Guard for OpenCode

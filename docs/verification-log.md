@@ -2,6 +2,55 @@
 
 Every claim in this repository should trace to an entry here. Newest first. "Verified" always means *executed against the stated build*, never inferred from documentation.
 
+## 2026-09-04 — evasion set implemented (engine-level; live re-verification pending)
+
+Implementation of `docs/evasion-2026-09-04.md` (E1–E10, FP-safe):
+
+- `npm test` 266 pass (12 new behavior pins in
+  `tests/unit/evasion-2026-09-04.test.js` plus flipped corpus expectations for
+  `BYP-GLB-*`, `BYP-ARC-004/005`, `BYP-GIT-007..009`, `BYP-SRC-005/007`,
+  `BYP-PROC-*`, `BYP-ENV-009..013`, `BYP-ASK-001`; `BYP-XCALL-*` stay `null`
+  in the stateless runner by design, covered by store unit tests).
+- `npm run check` clean (policy drift check passes after adding `SG-PROC-001`,
+  `SG-PROC-002`, `GG-PROC-001`, `GG-PROC-002` and regenerating; native rules
+  73 → 75).
+- `node scripts/security-test.mjs` 24/25 — the single failure is the
+  environmental heartbeat check (stale `phase=running` heartbeat from a prior
+  install; plugin not live in this scope), unrelated to the engine changes.
+
+**NOT yet verified live**: permission/tool-hook behavior of the new rules on a
+running `opencode2` build (same caveat as the 2026-09-01 entry). Do not repeat
+any new protection claim user-facing until the live smoke matrix is re-run.
+
+## 2026-09-04 — evasion set probing record (superseded by the implementation entry above)
+
+Scope: nine silent classes found by adversarial probing of the v0.4.0 engine.
+Each was executed as `analyzeCommand` / `decideToolCall` against
+`plugin/security-guard.js` with dummy names only (no live secrets, no model in
+the loop, no reads of real credential stores). Canonical counterparts were
+checked in the same run to confirm the control that *should* have fired.
+
+| Class | Silent (current `ALLOW`/`null`) | Blocked canonical | Corpus |
+|---|---|---|---|
+| Glob expansion | `cat .e*`, `cat .[e]nv`, `cat *key`, `for f in .e*; do cat $f; done`, `find . -name '.e*' -exec cat {} \;` | `cat .env`, `find … -name '*.env' …` | `BYP-GLB-001..005` |
+| Cross-call copy | `cp .env /tmp/x` + `curl --data @/tmp/x …` split across calls | Same legs joined by `&&` (`BYP-IND-004`) | `BYP-XCALL-001/002` |
+| Directory archive | `tar czf /tmp/b.tgz .`, `zip -r /tmp/s.zip .` | `tar … .env` | `BYP-ARC-004/005` |
+| Bare history | `git log -p`, `git show HEAD`, `git archive main -o …` | `git log -p -- .env`, `git show HEAD:.env` | `BYP-GIT-007..009` |
+| Broad search | `grep -r PASSWORD .` (shell) | `grep -r PASSWORD .env.production` | `BYP-SRC-005` |
+| procfs | `cat /proc/self/environ`, `strings /proc/self/environ`, `read /proc/self/environ` | — (new vector) | `BYP-PROC-001/002`, `BYP-SRC-006` |
+| Bare dumps | `export`, `declare`, `readonly`, `compgen -e` | `export -p`, `declare -p`, `env` | `BYP-ENV-009..011` |
+| Param expansion | `echo ${VAR:-x}`, `${VAR:+x}`, `${#VAR}` (secret-named) | `echo $VAR` | `BYP-ENV-012/013` |
+| Unknown viewer + ask-tier | `bat ~/.zshenv` | `cat ~/.zshenv` (ask) | `BYP-ASK-001` |
+
+Recorded first as documented residuals, then implemented (see entry above):
+`docs/evasion-2026-09-04.md`
+holds the per-class analysis and the FP-safe remediation plan (ask-where-
+uncertain, exemplar/broad-root scoping, session-bounded provenance, curated
+reader expansion, and the negatives each fix must keep silent).
+`docs/limitations.md` and `docs/threat-model.md` point at it.
+
+**Live verification still pending** (see implementation entry above).
+
 ## 2026-09-01 — v0.3.0 bypass fixes (engine-level; live re-verification pending)
 
 Scope: the circumvention classes found in a code audit of v0.2.0. Each was
