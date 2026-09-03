@@ -1,8 +1,10 @@
-# OpenCode Security Guard
+# Security Guard for OpenCode
 
 Defense-in-depth controls that reduce the risk of an LLM coding agent running through **OpenCode V2** reading, exposing, modifying, or transmitting sensitive local data such as API keys, SSH material, cloud credentials, or Terraform state.
 
 > **What this is not:** this is not a sandbox, not a complete DLP boundary, and not a guarantee against data exfiltration. An agent with shell and network access operates with your privileges. See [docs/limitations.md](docs/limitations.md).
+
+_**Unofficial third-party project. Not affiliated with, endorsed by, or maintained by the OpenCode team. “OpenCode” is referenced solely to describe compatibility.**_
 
 ## What problem does it solve?
 
