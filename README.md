@@ -41,6 +41,13 @@ Every claim below traces to an executed test in `tests/` and, where marked "live
 - **Deferred execution** — writing a script whose body references protected material raises an approval at write time, the only moment the guard can see it.
 - **Guard self-protection** — writes to the plugin's override file and heartbeat are denied, writes to plugin/policy sources require approval, and reads stay free so the guard is auditable; `doctor` fails (not warns) on a non-active or dead-pid heartbeat.
 - **MCP tools** — per-tool permission rules natively; trust-tier defaults, semantic classes (read-only / external-write / destructive / credential-related / unknown), argument-level protected-path rules (including references embedded inside longer argument strings) and secret-value rules via the guard.
+- **Interactive shells & stdin bodies** — piped commands into `zsh -i`/`bash -i`/`su`/`script`, `bash <unknown-carrier>`, `BASH_ENV` rc execution, and swallowed `su -c` payloads are approval-gated (`GGH-STDIN-001`, `GGD-DEF-002`).
+- **Interpreter env side-channels** — `jq -n env` / `jq '$ENV["X"]'` (jq/yq are interpreter verbs now), bare `%ENV`, and `printenv`/`env` inside `system()`/`execSync()` strings block or ask; path mentions inside those strings already blocked.
+- **Guard-file writers beyond redirections** — editors (`vim`/`nvim`/`ed`/`patch`/`emacs`/`code`), in-place `perl -i`/`ruby -i`/`awk -i`, sender output flags (`curl -o`, `wget -O`, `--output`), and `scp`/`sftp` remote destinations on guard-owned paths block/ask like `>` and `tee` always did.
+- **File identity survives renaming and directory copies** — `cp .env keyfile && cat keyfile` and `cp -r ~/.ssh /tmp/s && cat /tmp/s/config` block, same-command and cross-call (session store, read/grep tools, permission channel); same-command `rm` clears so reuse stays possible.
+- **Script carriers** — `package.json` scripts, Makefiles, justfiles, Taskfiles, Dockerfiles, and `.github/workflows` YAML get write-time body inspection (`npm run dump` asks at the write); `.envrc` is approval-gated (`GG-RC-008`).
+- **Secret-retrieval CLIs** — `aws secretsmanager get-secret-value`, `gcloud secrets versions access`, `kubectl get secret [-o yaml]`, `az keyvault secret show`, `vault kv get`, `docker exec … env` ask like `gh auth token`; listing forms stay silent.
+- **Ask-tier unknown verbs** — `tr < ~/.zshenv`, `while read … < ~/.zshenv`, `fold ~/.zshenv`, and `cd .secrets && cat tokens.txt` ask like `awk 1 ~/.zshenv`; metadata verbs (`ls`/`stat`/`file`/`du`/`wc`/`find`) and printers stay silent.
 - **Observable failure** — plugin liveness heartbeat + doctor; a silently absent guard is treated as a release defect.
 
 ### Not guaranteed

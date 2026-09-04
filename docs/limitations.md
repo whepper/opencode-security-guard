@@ -44,9 +44,23 @@ Three adversarial probe passes found — and the engine now closes —
 - **2026-09-04c**: secret-name indirection (`A=NAME; echo $A`, zsh
   `${(P)X}`), ask-tier script bodies, script-extension gaps, heredoc
   attachments, `trap` payloads, deferred installs (`crontab`, `at`).
+- **2026-09-04d**: interactive-shell stdin (`echo printenv | zsh -i`,
+  `su`, `script`, `sudo bash`, `bash /tmp/cmds`, swallowed `su -c`
+  payloads), string-level env access (`jq -n env`, `jq '$ENV["X"]'`,
+  `%ENV`, `printenv` inside `system()`/`execSync()` strings), guard-file
+  writers outside the redirection/verb scan (`vim`/`ed`/`patch`/`perl -i`,
+  `curl -o`/`wget -O`/`scp` destination), file-identity tracking
+  (`cp .env keyfile`, `cp -r ~/.ssh /tmp/s && cat /tmp/s/config`, symlinked
+  dirs), script carriers (`package.json` scripts, Makefiles, workflows,
+  Dockerfiles — `npm run`/`make`), secret-retrieval CLIs (`aws
+  secretsmanager get-secret-value`, `gcloud secrets versions access`,
+  `kubectl get secret -o yaml`, `az keyvault secret show`, `vault kv get`,
+  `docker exec env`), ask-tier unknown verbs/stdin-redir/`cd` traversal,
+  glob-tool wildcard stripping, and the `withinDir` precision bugs (bare
+  `credentials`/`health.json` false positives).
 
-Full tables with rule IDs and FP boundaries: the 2026-09-04b/-c entries in
-[docs/verification-log.md](verification-log.md).
+Full tables with rule IDs and FP boundaries: the 2026-09-04b/-c/-d entries
+in [docs/verification-log.md](verification-log.md).
 
 - **Glob/pattern expansion** (`BYP-GLB-001..005`) — `cat .e*`, `cat .[e]nv`, `cat *key`, `for f in .e*; do cat $f; done`, `find . -name '.e*' -exec cat {} \;` now `ask GGR-GLOB-001` (exemplar-matched); `*.log`/`*.js` stay silent.
 - **Cross-call temp copies** (`BYP-XCALL-001/002`) — `cp .env /tmp/x` then `curl --data @/tmp/x …` as two calls: single-command `&&` already blocked (`BYP-IND-004`); split calls are now covered by a bounded session store (32-entry FIFO, populated post-execution, cleared on `rm`/overwrite). The two legs stay `null` in the stateless corpus runner by design — coverage is unit-tested (`tests/unit/evasion-2026-09-04.test.js`).
@@ -58,9 +72,16 @@ Full tables with rule IDs and FP boundaries: the 2026-09-04b/-c entries in
 - **Parameter-expansion operators** (`BYP-ENV-012/013`) — `${VAR:-x}`, `${VAR:+x}`, `${#VAR}` now resolve to the secret name; `${PATH:-x}` stays silent.
 
 Remaining shell-heuristic residuals (still `null` by design): stdin-delivered
-filenames (`BYP-WRP-008`), heredocs, pre-existing on-disk scripts, `cp`-glob
-staging (file-management exempt), interpreter string obfuscation and ANSI-C
-quoting (see `docs/threat-model.md`).
+filenames (`BYP-WRP-008`), heredocs to non-gated verbs, pre-existing on-disk
+scripts (including `bash install.sh` and `.sh` operands — write-time gating
+only sees what the agent writes in-session), `cp`-glob staging (file-management
+exempt), interpreter string obfuscation and ANSI-C quoting, and extension-less
+benign-named carrier files other than the gated set (`source venv/bin/activate`
+stays silent; `BASH_ENV` and `bash /tmp/cmds` gate). Ask-tier material reached
+through `cd`-then-relative-read **as two separate tool calls** remains silent
+when the `cd` call is approved (the single-command form asks, `GGR-OTHER-002`).
+Content that never touches a protected path or secret-named variable remains
+outside the model by design ("filename signals are insufficient" below).
 
 New bypass shapes belong in the corpus first, then the engine.
 

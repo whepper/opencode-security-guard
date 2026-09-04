@@ -263,6 +263,12 @@ export const GENERATED_GUARD_POLICY = Object.freeze({
       "reason": "shell startup file"
     },
     {
+      "id": "GG-RC-008",
+      "form": "suffix",
+      "value": ".envrc",
+      "reason": "direnv file — executed automatically on cd, exports credentials into the shell (approval-gated; covered by write-time body inspection too)"
+    },
+    {
       "id": "GG-AMB-011",
       "form": "contains",
       "value": "kubeconfig",
@@ -487,7 +493,7 @@ export const GENERATED_GUARD_POLICY = Object.freeze({
 })
 // ==== END GENERATED GUARD POLICY ====
 
-export const PLUGIN_VERSION = "0.4.3"
+export const PLUGIN_VERSION = "0.4.6"
 export const PLUGIN_ID = "security-guard"
 
 // ============================================================================
@@ -558,7 +564,10 @@ function formMatches(form, path) {
   const base = basenameOf(path)
   switch (form.form ?? form.type) {
     case "basename":
-      return base === form.value
+      // A withinDir qualifier scopes the basename (GG-CLOUD-007, GG-SLF-002):
+      // without it any bare "credentials"/"health.json" match anywhere — an
+      // over-broad false positive (and precision loss for self-protection).
+      return base === form.value && (!form.withinDir || componentsOf(path).includes(form.withinDir))
     case "prefixName":
       return (
         base.startsWith(form.value) &&
@@ -602,6 +611,22 @@ function exceptionApplies(exc, path) {
     )
   }
   return formMatches(exc, path)
+}
+
+/** Find a compiled rule by ID across deny/ask lists (null when unknown). */
+function findPolicyRule(policy, ruleId) {
+  if (!ruleId) return null
+  for (const rule of policy.denyPaths ?? []) if (rule.id === ruleId) return rule
+  for (const rule of policy.askPaths ?? []) if (rule.id === ruleId) return rule
+  return null
+}
+
+/** True when a rule's form covers a whole DIRECTORY (dir / dirSegment2): a
+ *  copy of that directory reproduces every member, so members of the copy
+ *  must inherit the tier — component matching alone cannot see through a
+ *  copied/symlinked directory (`cp -r ~/.ssh /tmp/s && cat /tmp/s/config`). */
+function isDirFormRule(rule) {
+  return Boolean(rule && (rule.form === "dir" || rule.form === "dirSegment2"))
 }
 
 /**
@@ -769,6 +794,18 @@ const COMMAND_PREFIX_VERBS = new Set([
 const PREFIX_FLAG_WITH_VALUE = new Set(["-u", "-g", "-U", "-n", "-t", "-i", "-o", "-e", "-p", "-s", "-l", "-r", "-C", "-c", "-a", "-b", "-d", "-f", "-k", "-w"])
 const ENV_DUMP_VERBS = new Set(["env", "printenv", "alias"])
 const PRINTERS = new Set(["echo", "printf", "puts", "print", "logger", "tee"])
+// Editors overwrite their operand in place. Used ONLY by the guard
+// self-protection scan (writes to guard-owned files), so ordinary editing
+// of any other file is unaffected.
+const EDITOR_VERBS = new Set([
+  "vim", "vi", "view", "vimdiff", "nvim", "nano", "ed", "ex", "joe", "micro",
+  "emacs", "emacsclient", "helix", "hx", "code", "pico",
+])
+// Metadata-only verbs observe a path without reading its content; ask-tier
+// references must stay silent on these (NEG-FP-028: `ls ~/.zshenv`).
+const METADATA_VERBS = new Set([
+  "ls", "stat", "file", "realpath", "readlink", "test", "du", "wc", "find", "git",
+])
 // Verbs whose purpose is creating/moving/managing files, not reading them.
 // The conservative generic catch (GGR-OTHER-001) deliberately skips these so
 // ordinary workflows (cp .env.example .env, ssh-keygen -f id_ed25519,
@@ -878,10 +915,26 @@ const EMBEDDED_PATH_RE =
 /** Split a command into top-level segments on ; && || | and newlines,
  *  respecting single/double quotes and $()/backticks shallowly. */
 export function splitSegments(command) {
+  return splitSegmentsDetailed(command).map((s) => s.text)
+}
+
+/**
+ * Split a command, recording the separator that PRECEDED each segment.
+ * `piped` marks segments whose stdin is a pipe: their input is produced by
+ * the previous segment, so body-carrying shapes (`curl … | sh`, `env … | zsh -i`)
+ * carry no protected token in the consumer's argument list.
+ */
+export function splitSegmentsDetailed(command) {
   const segs = []
   let cur = ""
   let quote = null
   let depth = 0 // $( ) nesting
+  let piped = false
+  const push = () => {
+    segs.push({ text: cur, piped })
+    cur = ""
+    piped = false
+  }
   for (let i = 0; i < command.length; i++) {
     const ch = command[i]
     if (quote) {
@@ -910,15 +963,23 @@ export function splitSegments(command) {
       continue
     }
     if (depth === 0 && (ch === ";" || ch === "|" || ch === "\n" || ch === "&")) {
-      if ((ch === "|" || ch === "&") && command[i + 1] === ch) i++
-      segs.push(cur)
-      cur = ""
+      if ((ch === "|" || ch === "&") && command[i + 1] === ch) {
+        i++
+        push()
+        piped = false
+        continue
+      }
+      push()
+      // A single "|" gives the NEXT segment piped stdin; ; && || \n do not.
+      piped = ch === "|"
       continue
     }
     cur += ch
   }
-  segs.push(cur)
-  return segs.map((s) => s.trim()).filter(Boolean)
+  segs.push({ text: cur, piped })
+  return segs
+    .map((s) => ({ ...s, text: s.text.trim() }))
+    .filter((s) => Boolean(s.text))
 }
 
 const OPERATOR_RE = /[;|\n]/
@@ -1089,21 +1150,21 @@ function isSecretEnvName(policy, name) {
 
 const COPY_TRACK_VERBS = new Set(["cp", "install", "mv", "ln"])
 
-/** Bounded FIFO store: normalized dest -> {tier, ruleId, token}. */
+/** Bounded FIFO store: normalized dest -> {tier, ruleId, token, dir}. */
 export function createCopyProvenanceStore(opts = {}) {
   const maxEntries = opts.maxEntries ?? 32
-  const map = new Map() // normLower -> {tier, ruleId, token}
+  const map = new Map() // normLower -> {tier, ruleId, token, dir}
   const norm = (t) => {
     let n = normalizePathToken(String(t ?? "")).toLowerCase()
     n = n.replace(/^\.\/+/, "")
     return n
   }
   return {
-    note(destToken, tier, ruleId) {
+    note(destToken, tier, ruleId, dir = false) {
       const key = norm(destToken)
       if (!key || tier === "pass") return null
       if (map.has(key)) map.delete(key) // refresh recency
-      map.set(key, { tier, ruleId, token: normalizePathToken(String(destToken)) })
+      map.set(key, { tier, ruleId, token: normalizePathToken(String(destToken)), dir })
       while (map.size > maxEntries) {
         const oldest = map.keys().next().value
         map.delete(oldest)
@@ -1111,7 +1172,19 @@ export function createCopyProvenanceStore(opts = {}) {
       return key
     },
     lookup(token) {
-      const hit = map.get(norm(token))
+      const n = norm(token)
+      let hit = map.get(n)
+      if (!hit) {
+        // Directory-tracked dests cover their members: a read of a member of
+        // a copied/symlinked protected directory is a read of protected
+        // material even though the member basename is clean.
+        for (const e of map.values()) {
+          if (e.dir && n.startsWith(norm(e.token) + "/")) {
+            hit = e
+            break
+          }
+        }
+      }
       return hit ? { ...hit } : null
     },
     remove(token) {
@@ -1148,6 +1221,7 @@ export function detectCopyTracks(policy, command, opts = {}) {
     // Find first deny/ask source (same shape gates as analyzeCommand).
     let srcHit = null
     let srcIdx = -1
+    let srcNorm = ""
     for (let wi = 1; wi < words.length; wi++) {
       const n = normalizePathToken(words[wi])
       if (!n || !looksLikePath(n)) continue
@@ -1167,15 +1241,23 @@ export function detectCopyTracks(policy, command, opts = {}) {
         }
         srcHit = best
         srcIdx = wi
+        srcNorm = n
         break
       }
     }
     if (!srcHit) continue
     for (let wi = words.length - 1; wi > srcIdx; wi--) {
       const n = normalizePathToken(words[wi])
-      if (!n || !looksLikePath(n)) continue
+      if (!n || n.startsWith("-")) continue
       if (classifyPath(policy, n).tier === "pass") {
-        out.push({ dest: n, tier: srcHit.tier, ruleId: srcHit.ruleId })
+        const srcRule = findPolicyRule(policy, srcHit.ruleId)
+        const dirProp = isDirFormRule(srcRule) && basenameOf(srcNorm) === srcRule.value
+        const dest = dirProp
+          ? n
+          : n.endsWith("/")
+            ? n.replace(/\/+$/, "") + "/" + basenameOf(srcNorm)
+            : n
+        out.push({ dest, tier: srcHit.tier, ruleId: srcHit.ruleId, dir: dirProp })
         break
       }
     }
@@ -1227,18 +1309,31 @@ export function wrapperInnerCommand(verb, args) {
     return args.map(clean).join(" ")
   }
   if (verb === "xargs") {
-    // xargs builds a command from its arguments plus stdin; only the visible
-    // part can be analyzed (`xargs -a list cat` stays a documented blind spot).
+    // xargs syntax: `xargs [flags] command [args...]` — after the first
+    // non-flag token, EVERYTHING is the command and must stay verbatim so
+    // payload flags (`sh -c '…'`) remain analyzable. A generic flag-skip ate
+    // `sh -c 'base64 {}'`'s `-c` and produced a phantom "sh base64" body.
     const rest = []
+    let inCommand = false
     for (let i = 0; i < args.length; i++) {
       const a = clean(args[i])
-      if (a.startsWith("-")) {
-        if (/^-[A-Za-z]$/.test(a) && PREFIX_FLAG_WITH_VALUE.has(a)) i++
-        continue
+      if (!inCommand) {
+        if (a.startsWith("-")) continue
+        inCommand = true
       }
       rest.push(a)
     }
     return rest.join(" ")
+  }
+  if (verb === "su" || verb === "runuser") {
+    // `su -c CMD` / `runuser -c CMD`: the token after `-c` is the COMMAND,
+    // not a flag value — without extraction the payload is swallowed and
+    // `su -c 'printenv X'` stays silent.
+    for (let i = 0; i < args.length; i++) {
+      const a = clean(args[i])
+      if (/^-[A-Za-z]*c$/.test(a)) return i + 1 < args.length ? clean(args[i + 1]) : ""
+    }
+    return ""
   }
   if (COMMAND_PREFIX_VERBS.has(verb)) {
     const rest = []
@@ -1306,6 +1401,10 @@ export function analyzeCommand(policy, command, opts = {}) {
   // supplied by the adapter (`opts.knownCopies`). Same-command `cp` legs
   // append below without mutating the caller's array.
   const copies = [...(opts.knownCopies ?? [])] // temp-copy provenance: cp .env /tmp/x => /tmp/x inherits .env's tier
+  // Same-command `rm`/`shred` of a tracked dest clears tracking immediately
+  // (mirrors the adapter's post-execution clearing) so `rm keyfile && cat
+  // keyfile` does not over-block on a file the rm deleted.
+  const clearedCopies = [] // {token, dir} removed within this command
 
   // Classify a token, falling back to inherited tiers from tracked copies.
   // `mode` ("write" for segments that create/replace files) enables the
@@ -1325,26 +1424,51 @@ export function analyzeCommand(policy, command, opts = {}) {
       } catch {}
     }
     const base = basenameOf(tok)
-    const c = copies.find((c) => c.token === tok || basenameOf(c.token) === base)
+    const c = copies.find(
+      (c2) =>
+        c2.token === tok ||
+        basenameOf(c2.token) === base ||
+        (c2.dir &&
+          tok.startsWith(c2.token + "/") &&
+          // same-command rm/shred of the dir clears its members too
+          !clearedCopies.some((k) => {
+            const kt = normalizePathToken(String(k.token ?? "")).toLowerCase()
+            const nt = normalizePathToken(String(tok)).toLowerCase()
+            return nt === kt || (k.dir && nt.startsWith(kt + "/"))
+          }))
+    )
     if (c) return { tier: c.tier, ruleId: c.ruleId, category: "protected-path", reason: "temporary copy of protected material" }
     // E2 cross-call fallback: exact normalized match against session-tracked
     // dests (stricter than the basename fallback above to avoid flagging
-    // unrelated same-named files in other directories).
+    // unrelated same-named files in other directories). Directory-tracked
+    // dests cover members via prefix. Same-command rm/shred clears (see
+    // clearedCopies) applies here too.
     if (Array.isArray(opts.knownCopies)) {
       const norm = normalizePathToken(String(tok)).toLowerCase()
-      const hit = opts.knownCopies.find((k) => normalizePathToken(String(k.token ?? "")).toLowerCase() === norm)
+      const cleared = clearedCopies.some((k) => {
+        const kt = normalizePathToken(String(k.token ?? "")).toLowerCase()
+        return norm === kt || (k.dir && norm.startsWith(kt + "/"))
+      })
+      const hit = cleared
+        ? undefined
+        : opts.knownCopies.find(
+          (k) =>
+            normalizePathToken(String(k.token ?? "")).toLowerCase() === norm ||
+            (k.dir && norm.startsWith(normalizePathToken(String(k.token ?? "")).toLowerCase() + "/"))
+        )
       if (hit) return { tier: hit.tier, ruleId: hit.ruleId, category: "protected-path", reason: "temporary copy of protected material" }
     }
     return cls
   }
 
-  const segments = splitSegments(command)
+  const segments = splitSegmentsDetailed(command)
   for (let sIdx = 0; sIdx < segments.length; sIdx++) {
-    const rawSeg = segments[sIdx]
+    const rawSeg = segments[sIdx].text
+    const segPiped = segments[sIdx].piped
 
     // Recurse into command/process substitutions first.
     for (const sub of substitutions(rawSeg)) {
-      const r = analyzeCommand(policy, sub, { ...opts, _depth: depth + 1, assignments })
+      const r = analyzeCommand(policy, sub, { ...opts, _depth: depth + 1, assignments, _piped: segPiped || (opts._piped ?? false) })
       if (r) {
         return { ...r, category: r.category + "+substitution" }
       }
@@ -1367,11 +1491,64 @@ export function analyzeCommand(policy, command, opts = {}) {
     const verb = basenameOf(words[0]).toLowerCase()
     const args = words.slice(1)
 
+    // ---- BASH_ENV: a non-interactive shell executes the named rc file -------
+    // `BASH_ENV=/tmp/rc bash -c true` runs the file's body invisibly — the
+    // deferred-execution class (crontab/at analog). `ENV=` is too common as a
+    // plain CI assignment to gate; BASH_ENV has no legitimate agent workflow.
+    for (const t of toks) {
+      if (isAssignment(t) && assignmentName(t) === "BASH_ENV") {
+        return {
+          decision: "ask", ruleId: "GGD-DEF-002", category: "deferred-execution",
+          reason: "BASH_ENV names a rc file a shell will execute; its body cannot be inspected; approve only if it is free of secret material",
+          matched: "BASH_ENV",
+        }
+      }
+    }
+
+    // ---- stdin-command consumers: bodies invisible to one-pass analysis ----
+    // Shells and REPLs execute whatever arrives on stdin (`curl … | sh`,
+    // `echo printenv | zsh -i`, `su`, `script -q /dev/null`); a shell given an
+    // unknown-carrier file operand (`bash /tmp/cmds`) reads its body as
+    // commands. Ask on the attachment shape — the payload carries no token.
+    // FP-safe: `-c` payloads are extracted and analyzed above; script-shaped
+    // operands (*.sh etc.) stay silent (pre-existing-script residual); bare
+    // non-piped shells are dead weight for an agent.
+    {
+      const hasDashC = args.some((a) => /^-[A-Za-z]*c$/.test(shellDequote(String(a))))
+      const piped = segPiped || (opts._piped ?? false)
+      const scriptOperand = args.find((a) => !String(shellDequote(String(a))).startsWith("-"))
+      const scriptShaped = scriptOperand && SCRIPT_EXT_RE.test(String(scriptOperand))
+      const bareREPL =
+        INTERPRETERS.has(verb) && !SHELL_REEXEC_VERBS.has(verb) && verb !== "source" && verb !== "." && args.length === 0
+      let consumes = false
+      if (SHELL_REEXEC_VERBS.has(verb) && !hasDashC) {
+        // Bare non-piped shells are dead weight for an agent (an interactive
+        // session nobody types into), so only a pipe or an unknown-carrier
+        // operand makes the body uninspectable. `bash install.sh` stays
+        // silent (script-shaped operand, documented pre-existing residual).
+        consumes = piped || (scriptOperand && !scriptShaped)
+      } else if (verb === "su" || verb === "script" || verb === "expect") {
+        consumes = !hasDashC
+      } else if (verb === "sudo" && args.some((a) => shellDequote(String(a)) === "-s")) {
+        consumes = true
+      } else if (bareREPL) {
+        // A REPL executes stdin JavaScript/Python — only meaningful when fed.
+        consumes = piped
+      }
+      if (consumes) {
+        return {
+          decision: "ask", ruleId: "GGH-STDIN-001", category: "deferred-execution",
+          reason: "commands reach this shell/interpreter through stdin or an uninspectable body; approve only if they touch no secret material",
+          matched: verb,
+        }
+      }
+    }
+
     // ---- re-entry wrappers: analyze the payload as a command ----------------
     if (depth < 4) {
       const inner = wrapperInnerCommand(verb, args)
       if (inner && inner.trim() !== String(rawSeg).trim()) {
-        const r = analyzeCommand(policy, inner, { ...opts, _depth: depth + 1, assignments })
+        const r = analyzeCommand(policy, inner, { ...opts, _depth: depth + 1, assignments, _piped: segPiped || (opts._piped ?? false) })
         if (r) return { ...r, category: r.category + "+wrapper" }
       }
     }
@@ -1605,6 +1782,62 @@ export function analyzeCommand(policy, command, opts = {}) {
           matched: flat[1],
         }
       }
+      // 2026-09-04d: secret-retrieval CLIs print LIVE secret values through
+      // credentials the agent legitimately holds — the same exposure class
+      // as `gh auth token` / `git credential fill`, which gate above. Listing
+      // shapes (list-secrets, secrets list, kv list, docker exec ls) and
+      // non-secret resources (get nodes, get pods, s3 ls, docker ps) stay
+      // silent.
+      if (verb === "aws" && flat.includes("secretsmanager") && flat.includes("get-secret-value")) {
+        return {
+          decision: "ask", ruleId: "GGE-CLI-006", category: "credential-cli",
+          reason: "aws secretsmanager get-secret-value prints a stored secret value to stdout",
+          matched: "get-secret-value",
+        }
+      }
+      if (verb === "gcloud" && flat.includes("secrets") && flat.some((a) => a === "access" || /^access/.test(a))) {
+        return {
+          decision: "ask", ruleId: "GGE-CLI-007", category: "credential-cli",
+          reason: "gcloud secrets versions access prints a stored secret value to stdout",
+          matched: "secrets access",
+        }
+      }
+      if (verb === "kubectl" && flat[0] === "get" && (flat[1] === "secret" || flat[1] === "secrets")) {
+        // A named secret (or plural with -o yaml/json) renders stored VALUES
+        // into the transcript. A bare name listing (`kubectl get secrets`,
+        // NEG-FP-005) stays silent by design.
+        const rendersValues =
+          flat[1] === "secret" ||
+          args.some((a) => /^-o/.test(String(a)) || String(a).startsWith("--output"))
+        if (rendersValues) {
+          return {
+            decision: "ask", ruleId: "GGE-CLI-008", category: "credential-cli",
+            reason: "kubectl get secret renders stored secret values (DATA column / -o yaml) into the transcript",
+            matched: "get secret",
+          }
+        }
+      }
+      if (verb === "az" && flat.includes("keyvault") && flat.includes("secret") && flat.some((a) => a === "show" || a === "list")) {
+        return {
+          decision: "ask", ruleId: "GGE-CLI-009", category: "credential-cli",
+          reason: "az keyvault secret show prints a stored secret value to stdout",
+          matched: "keyvault secret",
+        }
+      }
+      if (verb === "vault" && flat.includes("kv") && flat.includes("get")) {
+        return {
+          decision: "ask", ruleId: "GGE-CLI-010", category: "credential-cli",
+          reason: "vault kv get renders stored key/value pairs (or a -field value) into the transcript",
+          matched: "kv get",
+        }
+      }
+      if (verb === "docker" && flat[0] === "exec" && (flat.includes("env") || flat.includes("printenv"))) {
+        return {
+          decision: "ask", ruleId: "GGE-CLI-011", category: "credential-cli",
+          reason: "docker exec env dumps the container environment into the transcript",
+          matched: "docker exec env",
+        }
+      }
     }
 
     // ---- deferred-install tools: crontab / at / batch -----------------------
@@ -1635,10 +1868,29 @@ export function analyzeCommand(policy, command, opts = {}) {
     // `system attribute`. Case-insensitive; ENV-style accessors need a
     // non-word char before them (or an opening bracket/dot after) so
     // ".env"-style FILENAMES never trigger the check.
-    if (/environ|getenv|process\.env|system attribute|deno\.env|(^|[^A-Za-z0-9_])\$?_?ENV\s*[\[.{]|%\s*ENV\b/i.test(rawSeg)) {
+    //
+    // 2026-09-04d: shapes that dumped the environment silently are added —
+    // jq/yq builtins (`jq -n env`, `jq -rn '$ENV["X"]'`), bare `ENV` (ruby
+    // `puts ENV`), and `printenv`/`env` invoked INSIDE interpreter exec
+    // strings (`awk 'BEGIN{system("printenv X")}'`), which no verb-level
+    // dump rule reaches. A preceding "." is excluded so jq field queries
+    // (`.env`) stay silent; "environment" prose is excluded by word rules.
+    //
+    // Commit/tag -m message text is prose (same exemption the path rules
+    // have): a commit message DESCRIBING these rules (`git commit -m "add
+    // jq env builtin guard"`) is not executing them. Substitution payloads
+    // (`-m "$(cat .env)"`) are still analyzed via the substitution recursion.
+    const commitMsgText =
+      verb === "git" &&
+      (gitSubcommand(args) === "commit" || gitSubcommand(args) === "tag") &&
+      args.some((a) => a === "-m" || a === "--message")
+    if (
+      !commitMsgText &&
+      /environ|getenv|process\.env|system attribute|deno\.env|(^|[^A-Za-z0-9_.])\$?_?ENV\s*[\[.{]|%\s*ENV\b|(^|[^A-Za-z0-9_.])\$?_?ENV(?![A-Za-z0-9_.])|(^|[^A-Za-z0-9_.])printenv(?![A-Za-z0-9_.])/i.test(rawSeg)
+    ) {
       const interpish =
         INTERPRETERS.has(verb) ||
-        /\b(python3?|node|ruby|perl|php|deno|bun|awk|gawk|mawk)\b/i.test(rawSeg)
+        /\b(python3?|node|ruby|perl|php|deno|bun|awk|gawk|mawk|jq|yq)\b/i.test(rawSeg)
       if (interpish) {
         const candidates = rawSeg.match(/\b[A-Z][A-Z0-9_]{2,}\b/g) ?? []
         const secretLiteral = candidates.find((n) => isSecretEnvName(policy, n))
@@ -1647,6 +1899,21 @@ export function analyzeCommand(policy, command, opts = {}) {
             decision: "block", ruleId: "GGE-VAR-020", category: "environment-dump",
             reason: "interpreter code reads a secret-named environment variable",
             matched: secretLiteral,
+          }
+        }
+        // Certain whole-environment dumps keep the `env`-verb block tier:
+        // jq/yq `env` builtin (bare or subscripted), perl `%ENV`, and bare
+        // `printenv` (with an argument it names a single variable → ask).
+        const jqEnvBuiltin =
+          (verb === "jq" || verb === "yq") &&
+          /(^|[^A-Za-z0-9_.])\$?env\b(?![A-Za-z0-9_.\[{])|\$ENV\b(?!\s*[\[.])|(^|[^A-Za-z0-9_.])\$?env\s*[.\[]/i.test(rawSeg)
+        const wholeDump = jqEnvBuiltin ||
+          /%\s*ENV\b(?!\s*[{[])|(^|[^A-Za-z0-9_.])printenv\b(?!\s*[A-Za-z])/i.test(rawSeg)
+        if (wholeDump) {
+          return {
+            decision: "block", ruleId: "GGE-VAR-021", category: "environment-dump",
+            reason: "interpreter code stringifies the whole environment (jq env builtin / %ENV / bare printenv)",
+            matched: verb,
           }
         }
         return {
@@ -1705,6 +1972,38 @@ export function analyzeCommand(policy, command, opts = {}) {
       }
       cand = cand.replace(/^\$\{\s*[#!]?\s*[A-Za-z_][A-Za-z0-9_]*[^}]*\}?/, "")
       if (!cand || /\$\{\s*[#!]?\s*[A-Za-z_]/.test(cand)) return
+      // E2 tracked-copy fallback must run BEFORE the shape gate: a copy
+      // destination the agent chose (`cp .env keyfile && cat keyfile`) is
+      // not path-shaped, and only TRACKED names match here — FP-free.
+      {
+        const c = copies.find(
+          (c2) => c2.token === cand || (c2.dir && cand.startsWith(c2.token + "/"))
+        )
+        if (c) {
+          classified.push({ token: basenameOf(cand), tier: c.tier, ruleId: c.ruleId, category: "protected-path", reason: "temporary copy of protected material" })
+          return
+        }
+        if (Array.isArray(opts.knownCopies)) {
+          const norm = normalizePathToken(String(cand)).toLowerCase()
+          const cleared = clearedCopies.some(
+            (k) => {
+              const kt = normalizePathToken(String(k.token ?? "")).toLowerCase()
+              return norm === kt || (k.dir && norm.startsWith(kt + "/"))
+            }
+          )
+          if (!cleared) {
+            const hit = opts.knownCopies.find(
+              (k) =>
+                normalizePathToken(String(k.token ?? "")).toLowerCase() === norm ||
+                (k.dir && norm.startsWith(normalizePathToken(String(k.token ?? "")).toLowerCase() + "/"))
+            )
+            if (hit) {
+              classified.push({ token: basenameOf(cand), tier: hit.tier, ruleId: hit.ruleId, category: "protected-path", reason: "temporary copy of protected material" })
+              return
+            }
+          }
+        }
+      }
       // Symlink/alias defense: when a resolver is available, benign-named
       // tokens may still resolve onto protected files, so attempt resolution
       // BEFORE the shape gates reject the token.
@@ -1780,6 +2079,48 @@ export function analyzeCommand(policy, command, opts = {}) {
         const inline = normalizePathToken(m[1])
         outTargets.push(inline || (toks[i + 1] ? normalizePathToken(unquote(toks[i + 1])) : ""))
       }
+      // 2026-09-04d: OUTPUT FLAGS of any verb write a file (-o, -O, --output,
+      // --output=FILE, wget --output-document=). The self-protect scan only
+      // ever fires on guard-owned basenames, so flag semantics that differ
+      // per tool (grep -o is not a file) are FP-free: the target token must
+      // literally name a guard file. This closes `curl -o override.json`,
+      // `wget -O health.json`, `sort -o override.json`.
+      for (let i = 0; i < args.length; i++) {
+        const d = unquote(args[i])
+        let val = null
+        if (["-o", "-O", "--output", "--output-document", "-out"].includes(d)) val = unquote(args[i + 1] ?? "")
+        else if (/^(?:--output|--output-document|-out)=/.test(d)) val = d.slice(d.indexOf("=") + 1)
+        if (val) outTargets.push(normalizePathToken(val))
+      }
+      // Editors take the path as an operand and overwrite it in place:
+      // `vim security-guard.config.json` previously named the guard file in
+      // a plain argument and stayed silent.
+      if (EDITOR_VERBS.has(verb) || verb === "patch") {
+        for (const w of args) {
+          const t = normalizePathToken(String(w))
+          if (t && !t.startsWith("-")) outTargets.push(t)
+        }
+      }
+      // In-place edits: perl/ruby/awk -i rewrite their file operands.
+      if (
+        (verb === "perl" || verb === "ruby" || verb === "awk" || verb === "gawk") &&
+        args.some((a) => /^-[A-Za-z]*i/.test(unquote(String(a))))
+      ) {
+        for (const w of args) {
+          const t = normalizePathToken(String(w))
+          if (t && !t.startsWith("-")) outTargets.push(t)
+        }
+      }
+      // Remote-copy senders: scp/sftp destination is the LAST non-flag arg.
+      if (verb === "scp" || verb === "sftp") {
+        for (let i = args.length - 1; i >= 0; i--) {
+          const t = normalizePathToken(args[i])
+          if (t && !t.startsWith("-")) {
+            outTargets.push(t)
+            break
+          }
+        }
+      }
       // Verbs that take the path as an argument. For copy/move shapes the
       // SOURCE is a read (backing up the policy file is routine), so only
       // verbs whose non-flag arguments are all destinations count as writes;
@@ -1838,9 +2179,39 @@ export function analyzeCommand(policy, command, opts = {}) {
     // Track temp-copy provenance: "cp .env /tmp/x" makes /tmp/x dangerous.
     // Only a DENIED/ASKED SOURCE followed by a clean destination counts;
     // writing INTO a protected name (cp .env.example .env) is not exfiltration.
+    // 2026-09-04d: the destination no longer needs to look path-like — the
+    // agent fully controls dest naming, so `cp .env keyfile` must track
+    // "keyfile" exactly like `cp .env /tmp/x` tracks "/tmp/x". Directory
+    // sources carry dir semantics: members of the copied/symlinked directory
+    // inherit the source tier (`cp -r ~/.ssh /tmp/s && cat /tmp/s/config`).
+    // A file copied onto a trailing-slash directory lands at dest/basename,
+    // so the joined path is tracked instead. `rm`/`shred` of a tracked dest
+    // clears the tracking within the same command (the adapter clears the
+    // session store after execution; this mirrors it pre-execution so
+    // `rm keyfile && cat keyfile` does not over-block on a deleted file).
+    if (classified.length && (verb === "rm" || verb === "shred")) {
+      for (let wi = 1; wi < words.length; wi++) {
+        const norm = normalizePathToken(words[wi])
+        if (!norm || norm.startsWith("-")) continue
+        for (let ci = copies.length - 1; ci >= 0; ci--) {
+          const c = copies[ci]
+          if (c.token === norm || basenameOf(c.token) === basenameOf(norm) || (c.dir && norm.startsWith(c.token + "/"))) {
+            copies.splice(ci, 1)
+          }
+        }
+        for (const k of opts.knownCopies ?? []) {
+          const kt = normalizePathToken(String(k.token ?? ""))
+          const isDir = Boolean(k.dir)
+          if (kt === norm || (isDir && norm.startsWith(kt + "/"))) {
+            clearedCopies.push(k)
+          }
+        }
+      }
+    }
     if (classified.length && FILE_MANAGEMENT_VERBS.has(verb)) {
       let srcIdx = -1
       let srcHit = null
+      let srcNorm = ""
       for (let wi = 1; wi < words.length; wi++) {
         const norm = normalizePathToken(words[wi])
         if (!norm || !looksLikePath(norm)) continue
@@ -1848,15 +2219,24 @@ export function analyzeCommand(policy, command, opts = {}) {
         if (cls.tier !== "pass") {
           srcIdx = wi
           srcHit = cls
+          srcNorm = norm
           break
         }
       }
       if (srcHit) {
         for (let wi = words.length - 1; wi > srcIdx; wi--) {
           const norm = normalizePathToken(words[wi])
-          if (!norm || !looksLikePath(norm)) continue
+          if (!norm || norm.startsWith("-")) continue
           if (classifyPath(policy, norm).tier === "pass") {
-            copies.push({ token: norm, tier: srcHit.tier, ruleId: srcHit.ruleId })
+            const srcRule = findPolicyRule(policy, srcHit.ruleId)
+            const dirProp =
+              isDirFormRule(srcRule) && basenameOf(srcNorm) === srcRule.value
+            const dest = dirProp
+              ? norm
+              : norm.endsWith("/")
+                ? norm.replace(/\/+$/, "") + "/" + basenameOf(srcNorm)
+                : norm
+            copies.push({ token: dest, tier: srcHit.tier, ruleId: srcHit.ruleId, dir: dirProp })
             break
           }
         }
@@ -1925,6 +2305,17 @@ export function analyzeCommand(policy, command, opts = {}) {
         const explicitAsk = classified.find((c) => c.tier === "ask" && c.explicit)
         if (explicitAsk) {
           return verdict(explicitAsk, "GGR-CFG-001", "tool pointed at cluster credential material via an explicit config flag", explicitAsk.token)
+        }
+        // 2026-09-04d: plain ask-tier references on unrecognized verbs now
+        // ask. Previously `fold <approval-gated>` / `tr < gated` (stdin
+        // redirection is classified in the same pass) stayed silent while
+        // `awk 1 <approval-gated>` asked — readers on ask-tier material are
+        // the incident class, and every verb that PRINTS content must gate
+        // like `awk` does. FP-safe: metadata verbs (ls/stat/file/du/…)
+        // and printers (echo/printf — text, not content) stay silent.
+        const plainAsk = classified.find((c) => c.tier === "ask" && !c.explicit)
+        if (plainAsk && !METADATA_VERBS.has(verb) && !PRINTERS.has(verb)) {
+          return verdict(plainAsk, "GGR-OTHER-002", "unrecognized operation references approval-gated material", plainAsk.token)
         }
       }
     }
@@ -2425,12 +2816,29 @@ export function normalizeToolCall(tool, input = {}) {
 /** Tools whose payload is a script the agent is about to place on disk.
  *  F3 (2026-09-04c): widened — interpreters execute by name, not by
  *  shebang, so `.ps1`/`.bat`/`.lua`/`.r`/`.awk`/`.pl` bodies were invisible
- *  to the deferred-execution check. */
-const SCRIPT_EXT_RE = /\.(sh|bash|zsh|ksh|fish|py|rb|pl|pm|php|js|mjs|cjs|ts|expect|ps1|psm1|bat|cmd|vbs|lua|r|awk|tcl)$/i
+ *  to the deferred-execution check.
+ *  2026-09-04d: carrier files whose embedded strings are executed —
+ *  package.json scripts (npm run), Makefiles (make), justfiles, Taskfiles,
+ *  Dockerfiles (docker build), .github/workflows YAML (CI) — have neither a
+ *  script extension nor a shebang, so the body check never saw them and
+ *  `write package.json -> npm run dump` stayed silent. */
+const SCRIPT_EXT_RE = /\.(sh|bash|zsh|ksh|fish|py|rb|pl|pm|php|js|mjs|cjs|ts|expect|ps1|psm1|bat|cmd|vbs|lua|r|awk|tcl|envrc)$/i
+
+const CARRIER_SCRIPT_RE_COMPILED =
+  new RegExp(
+    "(^|\\/)(package\\.json|Makefile|makefile|GNUmakefile|justfile|Justfile|Taskfile(\\.[^.]+)?|[^/]*\\.dockerfile|Dockerfile)$",
+    "i"
+  )
+const CARRIER_WORKFLOW_RE = /(^|\/)\.github\/workflows\/[^/]*\.ya?ml$/i
 
 /** True when written content looks like something an interpreter will run. */
 function looksLikeScript(path, content) {
   return SCRIPT_EXT_RE.test(String(path ?? "")) || /^#!.*\b(sh|bash|zsh|python[0-9.]*|node|ruby|perl|php|env)\b/.test(String(content ?? "").slice(0, 64))
+}
+
+/** Carrier files carry executable bodies in embedded strings. */
+function looksLikeCarrierScript(path) {
+  return CARRIER_SCRIPT_RE_COMPILED.test(String(path ?? "")) || CARRIER_WORKFLOW_RE.test(String(path ?? ""))
 }
 
 /** Decide on a normalized tool call. Returns null (no opinion) or a verdict. */
@@ -2440,7 +2848,13 @@ export function decideToolCall(policy, toolCall, opts = {}) {
     if (!knownCopies.length || !p) return null
     const norm = normalizePathToken(String(p)).toLowerCase().replace(/^\.\/+/, "")
     if (!norm) return null
-    return knownCopies.find((k) => normalizePathToken(String(k.token ?? "")).toLowerCase().replace(/^\.\/+/, "") === norm) ?? null
+    return (
+      knownCopies.find(
+        (k) =>
+          normalizePathToken(String(k.token ?? "")).toLowerCase().replace(/^\.\/+/, "") === norm ||
+          (k.dir && norm.startsWith(normalizePathToken(String(k.token ?? "")).toLowerCase().replace(/^\.\/+/, "") + "/"))
+      ) ?? null
+    )
   }
   switch (toolCall.kind) {
     case "shell":
@@ -2481,7 +2895,13 @@ export function decideToolCall(policy, toolCall, opts = {}) {
         // write-a-file-then-run-it shape: the guard cannot see script bodies
         // at execution time, so this is the only choke point that can. Ask —
         // never block — because scripts legitimately mention .env paths.
-        if (toolCall.mode === "write" && looksLikeScript(toolCall.path, toolCall.content)) {
+        // Carrier files (package.json scripts, Makefiles, workflows) carry
+        // executable bodies in embedded strings and have neither a script
+        // extension nor a shebang.
+        if (
+          toolCall.mode === "write" &&
+          (looksLikeScript(toolCall.path, toolCall.content) || looksLikeCarrierScript(toolCall.path))
+        ) {
           const hits = embeddedProtectedHits(policy, toolCall.content)
           if (hits.length) {
             const first = hits[0]
@@ -2566,7 +2986,24 @@ export function decideToolCall(policy, toolCall, opts = {}) {
         .replaceAll("{", "")
         .replaceAll("}", "")
       const cls = classifyPath(policy, stripped)
-      if (cls.tier === "pass") return null
+      if (cls.tier === "pass") {
+        // 2026-09-04d: wildcard stripping loses the protected name's shape
+        // (`**/*rsa` strips to "rsa" and passes). Exemplar-match the RAW
+        // pattern like the shell-side glob rule (E1) so `**/*rsa`/`**/?env`
+        // ask just like `**/.zshenv` does. `**/*.log`/`**/*.js` match no
+        // exemplar and stay silent.
+        const ex = globMayMatchProtected(toolCall.pattern)
+        if (ex) {
+          return {
+            decision: "ask",
+            ruleId: "GGR-GLOB-001+GLOB",
+            category: "discovery",
+            reason: "filename discovery over protected material (glob exemplar " + ex + ")",
+            matched: ex,
+          }
+        }
+        return null
+      }
       return {
         decision: "ask",
         ruleId: (cls.ruleId ?? "") + "+GLOB",
@@ -2595,7 +3032,11 @@ export function decidePermissionEvent(policy, action, resources, opts = {}) {
       const mode = action === "edit" ? "write" : "read"
       if (mode === "read" && knownCopies.length) {
         const norm = normalizePathToken(String(res)).toLowerCase().replace(/^\.\/+/, "")
-        const hit = knownCopies.find((k) => normalizePathToken(String(k.token ?? "")).toLowerCase().replace(/^\.\/+/, "") === norm)
+        const hit = knownCopies.find(
+          (k) =>
+            normalizePathToken(String(k.token ?? "")).toLowerCase().replace(/^\.\/+/, "") === norm ||
+            (k.dir && norm.startsWith(normalizePathToken(String(k.token ?? "")).toLowerCase().replace(/^\.\/+/, "") + "/"))
+        )
         if (hit) {
           return {
             decision: hit.tier === "deny" ? "block" : "ask",
@@ -2898,9 +3339,27 @@ export default {
       }
       // "ask" verdicts from the TOOL hook cannot raise a permission prompt
       // (that channel belongs to the permission system); they downgrade to
-      // block only for tools the permission layer cannot see (grep/glob
-      // paths). This is intentional: coverage first, documented in docs/.
-      if (v && v.decision === "ask" && (norm.kind === "grep" || norm.kind === "glob")) {
+      // block for tools the permission layer cannot see (grep/glob paths)
+      // and for shell commands the permission channel provably skips on
+      // beta-19086:
+      //   - stdin-command consumers (GGH-STDIN-001): the channel does not
+      //     carry pipe context, so a piped `zsh -i` ask degraded to a silent
+      //     allow (`echo id | zsh -i` executed live on 0.4.4).
+      //   - cd-led commands: V2 fires no permission `evaluate` event at all
+      //     for them (verified with a hash-tapped hook — `cd <ask-tier dir>`
+      //     produced no event while every other command did), so `cd
+      //     .secrets && cat tokens.txt` bypassed every ask-tier rule.
+      // The body is categorically uninspectable / the channel unreachable,
+      // so block is the only enforceable tier. Other single-segment asks
+      // (BASH_ENV, unknown-verb reads, credential CLIs) DO prompt and stay
+      // ask.
+      if (
+        v && v.decision === "ask" &&
+        (norm.kind === "grep" ||
+          norm.kind === "glob" ||
+          (norm.kind === "shell" &&
+            (v.ruleId === "GGH-STDIN-001" || /^\s*cd(\s|$)/.test(String(norm.command ?? "")))))
+      ) {
         writeHeartbeat({ phase: "running", lastDecision: v.ruleId })
         throw new Error(formatVerdict({ ...v, decision: "block" }))
       }
@@ -2940,7 +3399,7 @@ export default {
             }
             const tracks = detectCopyTracks(policy, cmd, { resolvePath })
             if (tracks.length) {
-              for (const t of tracks) copyStore.note(t.dest, t.tier, t.ruleId)
+              for (const t of tracks) copyStore.note(t.dest, t.tier, t.ruleId, t.dir)
             } else {
               // Clean-source overwrite of a tracked dest clears it
               // (`cp notes.txt /tmp/x` replaces the secrets).

@@ -44,6 +44,7 @@
         "SG-RC-005": "deny",
         "SG-RC-006": "deny",
         "SG-RC-007": "deny",
+        "SG-RC-008": "deny",
         "SG-NET-001": "deny",
         "SG-NET-002": "ask"
       }
@@ -194,6 +195,8 @@
       "reason": "Bash login config; same risk class as zprofile." },
     { "id": "SG-RC-007", "action": "read", "resource": "*.profile", "effect": "ask",
       "reason": "POSIX sh login config; may export credentials." },
+    { "id": "SG-RC-008", "action": "read", "resource": "*envrc", "effect": "ask",
+      "reason": "direnv file — executed automatically on cd; often exports credentials (mirror of guard GG-RC-008)." },
 
     { "id": "SG-AMB-000", "action": "webfetch", "resource": "*metadata.google.internal*", "effect": "ask",
       "reason": "Cloud metadata endpoints hand out service credentials to anything that can reach them." },
@@ -421,6 +424,7 @@
       { "id": "GG-RC-005", "form": "basename", "value": ".bashrc", "reason": "shell startup file" },
       { "id": "GG-RC-006", "form": "basename", "value": ".bash_profile", "reason": "shell startup file" },
       { "id": "GG-RC-007", "form": "basename", "value": ".profile", "reason": "shell startup file" },
+      { "id": "GG-RC-008", "form": "suffix", "value": ".envrc", "reason": "direnv file — executed automatically on cd, exports credentials into the shell (approval-gated; covered by write-time body inspection too)" },
       { "id": "GG-AMB-011", "form": "contains", "value": "kubeconfig", "reason": "cluster credential file outside the standard ~/.kube directory" },
       { "id": "GG-PROC-002", "form": "withinDir", "value": "cmdline", "withinDir": "proc", "reason": "procfs command lines may embed secrets (scoped to /proc/)" },
       { "id": "GG-HIS-001", "form": "basename", "value": ".zsh_history", "reason": "shell history accumulates past exports and secret-bearing command lines" },

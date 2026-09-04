@@ -2,6 +2,129 @@
 
 All notable changes. Format: Keep a Changelog; versioning: semantically ordered pre-releases.
 
+## 0.4.6 — 2026-09-04 live-verification fix: cd-led commands skip the permission channel
+
+Instrumented live investigation (temporary hash tap in the permission hook,
+removed in this release) on `opencode2` `0.0.0-beta-19086`: the plugin's
+`permission.evaluate` hook **fires for every shell command except those
+whose leading verb is `cd`** — verified with SHA-256 resource matching
+(`cd /tmp/rt2/.secrets && cat tok.txt`, brand-new path and text, produced
+no hook event at all while every adjacent command paired correctly with its
+own command text). Consequence: every ask-tier rule on a cd-led command
+(`cd .secrets && cat tokens.txt` — the 2026-09-04d finding) was silently
+unenforceable; deny-tier is unaffected because the tool hook always sees
+the true command text.
+
+### Fixed
+
+- Shell tool-hook asks now downgrade to **block** when the command is led
+  by `cd` (same mechanism as the `GGH-STDIN-001` downgrade). Where the
+  permission channel cannot see the command, an ask is unenforceable and
+  block is the only tier that means anything; the direct form of the same
+  read still prompts, so the legitimate approval path survives.
+- Also confirmed live on 0.4.5: `echo id | zsh -i` now **blocks**
+  (`GGH-STDIN-001`); saved shell approvals did not exist — the earlier
+  cd-shape silences were the missing events, not approvals. A project-
+  scoped saved approval **`read` / `*`** was found in the V2 permission
+  store, which is why native read-tier asks never surface — see the
+  approval-fatigue warning in README (review saved approvals periodically).
+
+## 0.4.5 — 2026-09-04 live-verification fix: piped-shell asks enforce as blocks
+
+Live verification of 0.4.4 on `opencode2` `0.0.0-beta-19086` (dummy data,
+guard active in the probing session) confirmed every block-tier fix and the
+ask channel for single-segment commands — but exposed that the permission
+channel does not carry **pipe context** on this beta: `echo id | zsh -i`
+(fresh command text, no saved approval) executed silently, although the
+engine computed `ask GGH-STDIN-001` on the full command. Tool-hook asks are
+not enforced for shell tools by design, so the ask degraded to a silent
+allow exactly for pipe-dependent rules.
+
+### Fixed
+
+- `GGH-STDIN-001` now downgrades to **block** in the tool hook for shell
+  calls (same mechanism as the grep/glob ask downgrade). `GGH-STDIN-001` is
+  the only pipe-dependent rule; single-segment asks (`GGD-DEF-002`
+  BASH_ENV, `GGR-OTHER-002`, credential CLIs, write-time carriers)
+  demonstrably prompt via the permission channel and stay ask.
+- Verified live on 0.4.4 (blocked as expected): `cp .env keyfile && cat
+  keyfile` (bare-name copy tracking), `cp -r ~/.ssh /tmp/s && cat
+  /tmp/s/config` and `ln -s ~/.ssh cfg && cat cfg/config` (dir identity),
+  `jq -n 'env.FAKE_RT_TOKEN'` and `awk 'BEGIN{system("printenv …")}'`
+  (string-level env), `su -c 'printenv …'` (payload extraction). Ask-tier
+  prompts surfaced live for `BASH_ENV` and `bash /tmp/cmds` (user declined
+  both). Engine-`ask` shapes matching **saved approvals** (exact command
+  text approved "always" earlier in the session) skip the prompt by design —
+  perturb the command text when re-testing.
+
+## 0.4.4 — 2026-09-04 fourth evasion set (verified engine-level, live restart pending)
+
+Fourth adversarial re-probe found eight classes silent on 0.4.3; four of
+them were also verified live-silent (dummy data only). All flipped with
+must-stay-silent negatives; `npm test` 413 pass, `npm run check` clean.
+
+### Fixed
+
+- **Interactive-shell stdin injection (`GGH-STDIN-001`).** `echo printenv |
+  zsh -i`, `printf … | bash -i`, `… | su`, `… | script -q /dev/null`,
+  `printf … | sudo bash` (piped context propagates through wrapper
+  recursion), and unknown-carrier operands (`bash /tmp/cmds`) now ask. The
+  payload carries no token, so the pipe itself is the gate — same class as
+  the heredoc rule `GGH-DOC-001`. Bonus bug fixed: `su -c 'printenv X'` /
+  `runuser -c '…'` payloads were swallowed as flag values and silently ran.
+- **String-level environment access (`GGE-VAR-021`, extended accessor).**
+  `jq -n env` / `jq -rn '$ENV["X"]'` (jq/yq are now interpreter verbs),
+  perl bare `%ENV`, and `printenv`/`env` inside interpreter exec strings
+  (`awk 'BEGIN{system("printenv X")}'`) dump values no verb-level rule
+  reached. Path mentions inside exec strings were already blocked and
+  remain the boundary: `awk 'BEGIN{system("cat .env")}'` blocks.
+- **Guard self-protection writers (GG-SLF via editors/output flags).**
+  `vim`/`nvim`/`ed`/`patch`/`code`/`emacs` on guard-owned paths, in-place
+  `perl -i`/`ruby -i`/`awk -i`, sender output flags (`curl -o`, `wget -O`,
+  `--output`, `sort -o`), and remote-copy destinations (`scp host:cfg
+  security-guard.config.json`) now block/ask like redirections did.
+- **File-identity tracking (E2 completion).** Copy destinations no longer
+  need to look path-like (`cp .env keyfile && cat keyfile` blocks), and
+  directory sources carry dir semantics: members of a copied or symlinked
+  protected directory inherit its tier (`cp -r ~/.ssh /tmp/s && cat
+  /tmp/s/config`), same-command and cross-call (session store + read/grep
+  tools + permission channel). Same-command `rm` of a dest clears
+  pre-execution so `rm keyfile && cat keyfile` does not over-block.
+- **Script carriers (`GGW-CONTENT`).** `package.json` scripts, Makefiles,
+  justfiles, Taskfiles, Dockerfiles, and `.github/workflows` YAML now get
+  write-time body inspection; `write package.json → npm run dump` asked at
+  write instead of executing silently. `.envrc` joined the script-body
+  extension list and got native/guard ask rules (`SG-RC-008`/`GG-RC-008`).
+- **Secret-retrieval CLIs (`GGE-CLI-006..011`).** `aws secretsmanager
+  get-secret-value`, `gcloud secrets versions access`, `kubectl get
+  secret … [-o yaml]`, `az keyvault secret show`, `vault kv get`, `docker
+  exec … env` now ask, matching the gated `gh auth token` / `git credential
+  fill` shapes. Listing forms (`kubectl get secrets`, `vault kv list`,
+  `gcloud secrets list`, `aws secretsmanager list-secrets`) stay silent.
+- **Ask-tier unknown verbs (`GGR-OTHER-002`).** `tr < ~/.zshenv`,
+  `while read … < ~/.zshenv`, `fold ~/.zshenv`, and `cd .secrets && cat
+  tokens.txt` now ask like `awk 1 ~/.zshenv` already did. Metadata verbs
+  (`ls`/`stat`/`file`/`du`/`wc`/`find`/`git`) and printers stay silent.
+- **Glob-tool discovery (`GGR-GLOB-001+GLOB`).** `**/*rsa`, `**/?env`,
+  `**/*env`, `**/*.zsh*` ask via exemplar matching instead of passing after
+  wildcard stripping; `**/*.log`/`**/id_rsa.pub` stay silent.
+- **Precision fixes.** `formMatches` now honors `withinDir` on `basename`
+  forms: bare `credentials` (GG-CLOUD-007) and bare `health.json` (GG-SLF-002)
+  outside their directories no longer false-positive. `xargs` payload
+  construction keeps `sh -c '…'` flags instead of eating them.
+- **`BASH_ENV` gate (`GGD-DEF-002`).** `BASH_ENV=/tmp/rc bash -c true` asks;
+  `ENV=prod make build` stays silent.
+
+### Live verification note
+
+Engine-level probes: `analyzeCommand`/`decideToolCall`/`decidePermissionEvent`
+with dummy data (`FAKE_RT_TOKEN`, `/tmp/rt/` dummy tree — never real paths).
+The four original live-silent confirmations (piped `zsh -i`/`bash -i` env
+read, jq/awk env reads, bare-name copy + read, dir-copy + member read,
+package.json carrier → `npm run dump`) were captured on 0.4.3 before the
+fix; live re-verification of 0.4.4 requires `opencode2 service restart` and
+the smoke checklist in docs/installation.md.
+
 ## 0.4.3 — 2026-09-04 third evasion set (verified live-silent on 0.4.2, fixed FP-safe)
 
 Third adversarial re-probe found six classes silent on 0.4.2. All flipped

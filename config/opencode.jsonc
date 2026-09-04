@@ -179,6 +179,8 @@
     { "action": "read", "resource": "*.bash_profile", "effect": "ask" },
     // SG-RC-007: POSIX sh login config; may export credentials.
     { "action": "read", "resource": "*.profile", "effect": "ask" },
+    // SG-RC-008: direnv file — executed automatically on cd; often exports credentials (mirror of guard GG-RC-008).
+    { "action": "read", "resource": "*envrc", "effect": "ask" },
     // SG-AMB-000: Cloud metadata endpoints hand out service credentials to anything that can reach them.
     { "action": "webfetch", "resource": "*metadata.google.internal*", "effect": "ask" },
     // SG-AMB-001: Non-default kubeconfig locations escape SG-CLOUD-004; cluster creds are serious but name may be benign.
