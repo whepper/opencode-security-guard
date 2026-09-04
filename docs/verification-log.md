@@ -64,6 +64,11 @@ ask-tier enforced for cd-less single-segment commands via the permission
 channel, and both known channel blind spots (piped stdin consumers, cd-led
 commands) compensated with tool-hook downgrades.
 
+**Upstream report filed:** the cd-led no-event gap is a V2 platform issue
+(every plugin's permission hook is affected), reported as
+anomalyco/opencode#47356 with a minimal tap-plugin repro and the
+workaround this plugin ships.
+
 Method: direct `analyzeCommand` / `decideToolCall` / `decidePermissionEvent`
 probes plus a live session run (the guard was active in the probing session,
 so dangerous ops executed as real tool calls with a dummy tree under `/tmp/rt`
