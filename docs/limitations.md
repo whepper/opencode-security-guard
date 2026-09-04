@@ -27,17 +27,26 @@ The engine tokenizes and pattern-matches; it does not implement a shell grammar.
 - **unknown verbs touching protected names** ask only on explicit credential flags, otherwise stay silent — deliberate false-positive control that trades coverage (e.g. `bat ~/.zshenv` stays silent while `cat ~/.zshenv` asks — `BYP-ASK-001`);
 - **case-folding false positives on Linux**: `FOO.PEM` is a different file than `foo.pem` there, and gets asked about anyway. Accepted: the alternative is a universal bypass on macOS/Windows.
 
-## Known bypass set 2026-09-04 (fixed in-engine; live re-verification pending)
+## Known bypass sets 2026-09-04 (fixed in-engine; live re-verification pending)
 
-Engine-level probes (dummy names only, no live secrets) found nine silent
-classes (E1–E10, [docs/evasion-2026-09-04.md](evasion-2026-09-04.md)) and,
-in a second 2026-09-04b pass, sixteen more (flag-only env dumps, interpreter
-env accessors, process-substitution bodies, sender `@`-globs, `git grep`,
-`git stash show -p`, `git credential fill`, macOS keychain and token-printing
-CLIs, backup names `.env~`/`#.env#`, glob-tool bracket text, grep-tool broad
-roots, `/etc/environment`, shell history, `~/.secrets`). All are fixed and
-corpus-pinned — see the 2026-09-04b entry in
-[docs/verification-log.md](verification-log.md) for the full table.
+Three adversarial probe passes found — and the engine now closes —
+**31 silent classes** in total (dummy names only, no live secrets):
+
+- **E1–E10** ([docs/evasion-2026-09-04.md](evasion-2026-09-04.md)): glob
+  expansion, cross-call copies, directory archives, bare git history,
+  broad-root search, procfs, bare dumps, parameter-expansion operators,
+  ask-tier viewers, glob discovery.
+- **2026-09-04b**: flag-only env dumps, interpreter env accessors,
+  process-substitution bodies, sender `@`-globs, `git grep`, `git stash
+  show -p`, `git credential fill`, macOS keychain and token-printing CLIs,
+  backup names (`.env~`, `#.env#`), glob/grep tool gaps, `/etc/environment`,
+  shell history, `~/.secrets`.
+- **2026-09-04c**: secret-name indirection (`A=NAME; echo $A`, zsh
+  `${(P)X}`), ask-tier script bodies, script-extension gaps, heredoc
+  attachments, `trap` payloads, deferred installs (`crontab`, `at`).
+
+Full tables with rule IDs and FP boundaries: the 2026-09-04b/-c entries in
+[docs/verification-log.md](verification-log.md).
 
 - **Glob/pattern expansion** (`BYP-GLB-001..005`) — `cat .e*`, `cat .[e]nv`, `cat *key`, `for f in .e*; do cat $f; done`, `find . -name '.e*' -exec cat {} \;` now `ask GGR-GLOB-001` (exemplar-matched); `*.log`/`*.js` stay silent.
 - **Cross-call temp copies** (`BYP-XCALL-001/002`) — `cp .env /tmp/x` then `curl --data @/tmp/x …` as two calls: single-command `&&` already blocked (`BYP-IND-004`); split calls are now covered by a bounded session store (32-entry FIFO, populated post-execution, cleared on `rm`/overwrite). The two legs stay `null` in the stateless corpus runner by design — coverage is unit-tested (`tests/unit/evasion-2026-09-04.test.js`).

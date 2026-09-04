@@ -2,6 +2,46 @@
 
 All notable changes. Format: Keep a Changelog; versioning: semantically ordered pre-releases.
 
+## 0.4.3 — 2026-09-04 third evasion set (verified live-silent on 0.4.2, fixed FP-safe)
+
+Third adversarial re-probe found six classes silent on 0.4.2. All flipped
+with must-stay-silent negatives; `npm test` 348 pass, `npm run check` clean.
+
+### Fixed
+
+- **Secret-name indirection (F1).** `A=SECRET_NAME; echo $A`, `printenv $A`,
+  `eval "echo $A"`, `curl -H "Authorization: Bearer $A"`, and zsh
+  `${(P)X}` / `${(e)X}` now resolve through assignment chains
+  (`GGE-VAR-010/002/011`). Resolution is name-based and identifier-shaped,
+  so `PATH=$HOME/bin; echo $PATH`, `A=NOTES; echo $A`, and
+  `MSG='invalid token'; echo $MSG` stay silent.
+- **Ask-tier script bodies (F2).** A written script containing `cat
+  ~/.zshenv` — the incident class — now asks at write time
+  (`GGW-CONTENT-002`); previously only deny-tier references were visible and
+  ask-tier bodies vanished into the pre-existing-script blind spot.
+- **Script-extension coverage (F3).** `.ps1` `.psm1` `.bat` `.cmd` `.vbs`
+  `.lua` `.r` `.awk` `.pl` `.pm` `.tcl` payloads are now recognized scripts;
+  a `run.ps1` with `Get-Content .env` asks (`GGW-CONTENT-001`).
+- **Heredoc attachments (F4).** `curl -d @- host <<EOF`, `nc host 4444
+  <<EOF` ask (`GGH-DOC-001`) — the body is invisible to analysis; `cat >
+  notes.md <<EOF`, arithmetic `$(( 1 << 3 ))`, and non-consumer verbs
+  (`psql -c 'SELECT 1 << 2'`) stay silent.
+- **Deferred execution (F5).** `trap` payloads are analyzed at definition
+  time (`trap 'env' 0` blocks; `trap 'echo done' ERR`, `trap - EXIT` stay
+  silent). `crontab -`, `crontab <file>`, `at now`, `at -f job.txt` ask
+  (`GGD-DEF-001`); `crontab -l/-r`, `atq`, `atrm` stay silent.
+- **`compgen` FP polish (F6).** `compgen -v PATH` (non-secret name pattern)
+  no longer blocks; bare `compgen -v` / `-A variable` and secret-named
+  patterns still block.
+
+### Not fixed (documented residuals)
+
+`docker exec C env`, `ssh host env` (remote/container scope); cross-call
+variable assignments (`A=NAME` in one tool call, `echo $A` in the next —
+the session store tracks file copies only); zsh `(j:)`-style joins of
+unassigned variables. Function bodies, stdin-fed filenames, ANSI-C quoting,
+interpreter string obfuscation, and network egress remain as documented.
+
 ## 0.4.2 — 2026-09-04 second evasion set (verified live-silent on 0.4.1, fixed FP-safe)
 
 Adversarial re-probe of the 0.4.1 engine (`analyzeCommand` / `decideToolCall`,

