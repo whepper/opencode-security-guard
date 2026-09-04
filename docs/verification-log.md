@@ -52,6 +52,15 @@ live), saved approvals short-circuit asks before the hook fires, and a
 project-scoped **`read` / `*`** approval in the V2 permission store
 (`opencode.db`, `permission` table) is why native read asks never surface.
 
+**Write-tool asks (0.4.7):** the carrier write-time ask was confirmed
+live-silent on 0.4.6 (package.json with a dump script wrote without a
+prompt; user confirmed no prompt). The permission channel receives only
+the path, not the content, so GGW-CONTENT and ask-tier path writes were
+unenforceable → fixed in 0.4.7 (write-path asks downgrade to block). Live
+verification of 0.4.7 after restart: the carrier write must BLOCK; a
+benign carrier write must stay silent; `patch policy/policy.jsonc
+/dev/null` (shell, cd-less) should still PROMPT via the channel.
+
 Remaining live verification after redeploying 0.4.6 + restart: **DONE —
 2026-09-04, beta-19086, plugin 0.4.6, doctor healthy.** `cd
 /tmp/rt2/.secrets && cat tok.txt` (cd-led ask-tier) → **BLOCKED**

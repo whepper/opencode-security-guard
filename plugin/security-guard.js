@@ -493,7 +493,7 @@ export const GENERATED_GUARD_POLICY = Object.freeze({
 })
 // ==== END GENERATED GUARD POLICY ====
 
-export const PLUGIN_VERSION = "0.4.6"
+export const PLUGIN_VERSION = "0.4.7"
 export const PLUGIN_ID = "security-guard"
 
 // ============================================================================
@@ -3349,16 +3349,20 @@ export default {
       //     for them (verified with a hash-tapped hook — `cd <ask-tier dir>`
       //     produced no event while every other command did), so `cd
       //     .secrets && cat tokens.txt` bypassed every ask-tier rule.
-      // The body is categorically uninspectable / the channel unreachable,
-      // so block is the only enforceable tier. Other single-segment asks
-      // (BASH_ENV, unknown-verb reads, credential CLIs) DO prompt and stay
-      // ask.
+      //   - write-tool asks (0.4.7): the permission channel sees only the
+      //     file path, never the written content, so script-body/carrier
+      //     asks (GGW-CONTENT-001/002 — verified live: a package.json whose
+      //     script dumps .env wrote silently on 0.4.6) and ask-tier path
+      //     writes were silently allowed. Writes to ask-tier/deny-tier
+      //     material now enforce as blocks; the direct shell form of the
+      //     same write still prompts, so legitimate paths survive.
       if (
         v && v.decision === "ask" &&
         (norm.kind === "grep" ||
           norm.kind === "glob" ||
           (norm.kind === "shell" &&
-            (v.ruleId === "GGH-STDIN-001" || /^\s*cd(\s|$)/.test(String(norm.command ?? "")))))
+            (v.ruleId === "GGH-STDIN-001" || /^\s*cd(\s|$)/.test(String(norm.command ?? "")))) ||
+          (norm.kind === "path" && norm.mode === "write"))
       ) {
         writeHeartbeat({ phase: "running", lastDecision: v.ruleId })
         throw new Error(formatVerdict({ ...v, decision: "block" }))

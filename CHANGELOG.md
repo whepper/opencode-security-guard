@@ -2,6 +2,33 @@
 
 All notable changes. Format: Keep a Changelog; versioning: semantically ordered pre-releases.
 
+## 0.4.7 — live-verification fix: write-tool asks enforce as blocks
+
+Live verification of the 0.4.4 carrier fix on beta-19086 showed the
+write-time ask (`GGW-CONTENT-001`) never reached the user: a `package.json`
+whose script dumps `.env` **wrote silently** (no prompt). Root cause, same
+family as the 0.4.5/0.4.6 gaps: tool-hook asks are unenforced for path-kind
+tools, and the permission channel sees only the file path — never the
+written content — so content-based asks cannot reach it. The same mechanism
+silently allowed write-tool calls to ask-tier paths (e.g. writing
+`~/.zshrc` or `.envrc` directly).
+
+### Fixed
+
+- Write-tool ask verdicts (`norm.kind === "path"`, mode write) downgrade to
+  **block** in the tool hook: script-body/carrier content asks
+  (`GGW-CONTENT-001/002`) and ask-tier path writes (`GG-RC-008`,
+  `GG-SLF-004`, …) now enforce instead of silently allowing. The direct
+  shell form of the same write is cd-less and single-segment, so it still
+  prompts through the permission channel — the legitimate approval path
+  survives (e.g. `vim policy/policy.jsonc` asks and can be approved; the
+  write-tool form blocks).
+- Behavior change vs the documented design ("ask, never block, for script
+  bodies"): on this beta the ask was unverifiable, and a prompt the platform
+  may not deliver is worse than a block with a clear message. Agents writing
+  legitimate scripts that mention `.env` paths should use sanitized names
+  (`.env.example` stays excepted) — the block message says so.
+
 ## 0.4.6 — 2026-09-04 live-verification fix: cd-led commands skip the permission channel
 
 Instrumented live investigation (temporary hash tap in the permission hook,
