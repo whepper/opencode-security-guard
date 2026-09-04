@@ -74,12 +74,19 @@ in [docs/verification-log.md](verification-log.md).
 Remaining shell-heuristic residuals (still `null` by design): stdin-delivered
 filenames (`BYP-WRP-008`), heredocs to non-gated verbs, pre-existing on-disk
 scripts (including `bash install.sh` and `.sh` operands — write-time gating
-only sees what the agent writes in-session), `cp`-glob staging (file-management
-exempt), interpreter string obfuscation and ANSI-C quoting, and extension-less
-benign-named carrier files other than the gated set (`source venv/bin/activate`
-stays silent; `BASH_ENV` and `bash /tmp/cmds` gate). Ask-tier material reached
+only sees what the agent writes in-session; execution-time body inspection
+covers non-script interpreter operands only), `cp`-glob staging (file-management
+exempt; variable-indirect staging is now tracked), interpreter string
+obfuscation and ANSI-C quoting, and extension-less benign-named carrier files
+other than the gated set (`source venv/bin/activate` stays silent; `BASH_ENV`
+and `bash /tmp/cmds` gate). Ask-tier material reached
 through `cd`-then-relative-read **as two separate tool calls** remains silent
 when the `cd` call is approved (the single-command form asks, `GGR-OTHER-002`).
+Shell writes TO file-form secret names (`cp template .env`, key generation)
+stay silent by design while writes INTO guarded stores (`.ssh/`, `.aws/`,
+`.kube/`, startup files) now match tool tiers (`GGW-SHELL-WRITE-001/002`).
+Reverse-order payload-before-copy bodies are caught at execution time for
+non-script operands; script-shaped reverse-order indirection remains residual.
 Content that never touches a protected path or secret-named variable remains
 outside the model by design ("filename signals are insufficient" below).
 

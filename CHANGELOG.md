@@ -2,6 +2,37 @@
 
 All notable changes. Format: Keep a Changelog; versioning: semantically ordered pre-releases.
 
+## 0.4.9 — red-team 2026-09-04e fixes (F1/F2/F3)
+
+Adversarial review found three silent classes; all now gated (dummy paths
+only, engine-verified, `npm test` 430 pass):
+
+- **F1 — variable-indirect copy staging** (`F=.env; cp $F /tmp/x` then
+  `cat /tmp/x`): copy provenance (`detectCopyTracks` + same-command
+  tracking) resolved only literals, so indirection skipped tracking while
+  the literal was recorded. Both now resolve assignment chains (multi-hop
+  included) for sources and destinations; `openssl -in $F` input flags
+  resolve too; `rm`/`shred` clears resolve as well. Safe sources
+  (`notes.txt`, `.env.example`) still never track.
+- **F2 — extension-mismatched interpreter payloads** (`write /tmp/job.txt`
+  with python code opening `.env`, then `python3 /tmp/job.txt`): the
+  write-time body check saw scripts/carriers only. Writes whose content
+  looks executable (new `GGW-CONTENT-003/004`) now ask regardless of
+  extension — prose without code shape (`notes/deploy.md` mentioning
+  ``cat .env``) stays silent; content referencing session-tracked copies
+  asks as well. Execution-time body inspection (bounded 32 KiB read,
+  non-script interpreter operands only, new `GGR-LANG-002/003`) closes
+  pre-existing and reverse-order bodies; `*.py`/`*.sh` keep write-time-only
+  gating so approved project scripts and `bash install.sh` keep working.
+- **F3 — shell writes into guarded destinations** (`cp /tmp/evil
+  ~/.ssh/config`, `echo hi > ~/.zshenv`): shell file-management and
+  redirections ignored protected tiers while `edit`/`write` tools gated
+  them. Shell now matches — ask-tier dests ask (`GGW-SHELL-WRITE-002`),
+  directory-store dests deny (`GGW-SHELL-WRITE-001`, parent-directory
+  aware so `~/.ssh/id_rsa` blocks). File-form dests (`.env`, `.key`)
+  stay silent so `cp .env.example .env` and key generation keep working;
+  `chmod`/`chown` untouched.
+
 ## 0.4.8 — operator content-write allowlist
 
 0.4.7's write-path downgrade (ask → block) is correct for untrusted

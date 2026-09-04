@@ -493,7 +493,7 @@ export const GENERATED_GUARD_POLICY = Object.freeze({
 })
 // ==== END GENERATED GUARD POLICY ====
 
-export const PLUGIN_VERSION = "0.4.8"
+export const PLUGIN_VERSION = "0.4.9"
 export const PLUGIN_ID = "security-guard"
 
 // ============================================================================
@@ -1209,9 +1209,34 @@ export function createCopyProvenanceStore(opts = {}) {
 export function detectCopyTracks(policy, command, opts = {}) {
   const out = []
   const promote = opts.promoteAskToDenyIds ?? policy.promoteAskToDenyIds ?? []
+  // F1 (2026-09-04e): assignments persist across segments within one command.
+  // Without this, variable-indirect staging slipped past provenance while the
+  // literal was tracked.
+  const assignments = {}
+  const resolveAssigned = (name) => {
+    let val = assignments[name]
+    let hops = 0
+    while (val && /^[A-Za-z_][A-Za-z0-9_]*$/.test(val) && assignments[val] && hops++ < 4) {
+      val = assignments[val]
+    }
+    return val
+  }
+  // Candidate path strings for a token: the literal plus assigned values its
+  // variable references resolve to.
+  const variantsForToken = (tok) => {
+    const out2 = [normalizePathToken(tok)]
+    for (const v of varRefs(String(tok))) {
+      const val = resolveAssigned(v)
+      if (val) out2.push(normalizePathToken(val))
+    }
+    return [...new Set(out2.filter(Boolean))]
+  }
   for (const rawSeg of splitSegments(String(command ?? ""))) {
     const toks = tokenize(rawSeg).map((t) => (isAssignment(t) ? t : unquote(t)))
     if (!toks.length) continue
+    for (const t of toks) {
+      if (isAssignment(t)) assignments[assignmentName(t)] = assignmentValue(t)
+    }
     let idx = 0
     while (idx < toks.length && isAssignment(toks[idx]) && !toks[idx].includes("(")) idx++
     const words = toks.slice(idx)
@@ -1223,17 +1248,23 @@ export function detectCopyTracks(policy, command, opts = {}) {
     let srcIdx = -1
     let srcNorm = ""
     for (let wi = 1; wi < words.length; wi++) {
-      const n = normalizePathToken(words[wi])
-      if (!n || !looksLikePath(n)) continue
-      const cls = classifyPath(policy, n, { promoteAskToDenyIds: promote })
-      if (cls.tier !== "pass") {
+      let found = null
+      for (const n of variantsForToken(words[wi])) {
+        if (!n || !looksLikePath(n)) continue
+        const cls = classifyPath(policy, n, { promoteAskToDenyIds: promote })
+        if (cls.tier !== "pass") {
+          found = { cls, n }
+          break
+        }
+      }
+      if (found) {
         // Resolve symlinks when available so `cp link /tmp/x` tracks the
         // real source tier.
-        let best = cls
+        let best = found.cls
         if (typeof opts.resolvePath === "function") {
           try {
-            const real = opts.resolvePath(n)
-            if (real && real !== n) {
+            const real = opts.resolvePath(found.n)
+            if (real && real !== found.n) {
               const rcls = classifyPath(policy, real, { promoteAskToDenyIds: promote })
               if (rcls.tier !== "pass" && rcls.tier === "deny") best = rcls
             }
@@ -1241,22 +1272,36 @@ export function detectCopyTracks(policy, command, opts = {}) {
         }
         srcHit = best
         srcIdx = wi
-        srcNorm = n
+        srcNorm = found.n
         break
       }
     }
     if (!srcHit) continue
     for (let wi = words.length - 1; wi > srcIdx; wi--) {
-      const n = normalizePathToken(words[wi])
-      if (!n || n.startsWith("-")) continue
-      if (classifyPath(policy, n).tier === "pass") {
+      // Destinations may themselves be variables. Prefer fully-resolved
+      // variants: the raw `$D` form always classifies clean and would shadow
+      // the real dest (`D=/tmp/x; cp .env $D` must track `/tmp/x`).
+      // Literals carrying runtime prefixes (`$HOME/...`) still work: with no
+      // resolved variant the literal governs.
+      const all = variantsForToken(words[wi])
+      const concrete = all.filter((n) => !n.includes("$"))
+      const pool = concrete.length ? concrete : all
+      let destCand = null
+      for (const n of pool) {
+        if (!n || n.startsWith("-")) continue
+        if (classifyPath(policy, n).tier === "pass") {
+          destCand = n
+          break
+        }
+      }
+      if (destCand) {
         const srcRule = findPolicyRule(policy, srcHit.ruleId)
         const dirProp = isDirFormRule(srcRule) && basenameOf(srcNorm) === srcRule.value
         const dest = dirProp
-          ? n
-          : n.endsWith("/")
-            ? n.replace(/\/+$/, "") + "/" + basenameOf(srcNorm)
-            : n
+          ? destCand
+          : destCand.endsWith("/")
+            ? destCand.replace(/\/+$/, "") + "/" + basenameOf(srcNorm)
+            : destCand
         out.push({ dest, tier: srcHit.tier, ruleId: srcHit.ruleId, dir: dirProp })
         break
       }
@@ -1274,17 +1319,28 @@ export function detectCopyClears(command, trackedNorms) {
   const drop = []
   if (!trackedNorms?.length) return drop
   const set = new Set(trackedNorms.map((t) => normalizePathToken(String(t)).toLowerCase().replace(/^\.\/+/, "")))
+  const clearAssignments = {}
   for (const rawSeg of splitSegments(String(command ?? ""))) {
     const toks = tokenize(rawSeg).map((t) => (isAssignment(t) ? t : unquote(t)))
     if (!toks.length) continue
+    for (const t of toks) {
+      if (isAssignment(t)) clearAssignments[assignmentName(t)] = assignmentValue(t)
+    }
     let idx = 0
     while (idx < toks.length && isAssignment(toks[idx]) && !toks[idx].includes("(")) idx++
     const words = toks.slice(idx)
     if (!words.length) continue
     const verb = basenameOf(words[0]).toLowerCase()
     for (const w of words.slice(1)) {
-      const n = normalizePathToken(String(w)).toLowerCase().replace(/^\.\/+/, "")
-      if (n && set.has(n) && (verb === "rm" || verb === "shred")) drop.push(n)
+      // F1 (2026-09-04e): `D=/tmp/x; rm $D` clears the tracked dest.
+      const cands = [normalizePathToken(String(w)).toLowerCase().replace(/^\.\/+/, "")]
+      for (const v of varRefs(String(w))) {
+        const val = clearAssignments[v]
+        if (val) cands.push(normalizePathToken(String(val)).toLowerCase().replace(/^\.\/+/, ""))
+      }
+      for (const n of [...new Set(cands.filter(Boolean))]) {
+        if (n && set.has(n) && (verb === "rm" || verb === "shred")) drop.push(n)
+      }
     }
   }
   return [...new Set(drop)]
@@ -2034,10 +2090,23 @@ export function analyzeCommand(policy, command, opts = {}) {
     }
 
     if (verb === "openssl") {
+      // F1 (2026-09-04e): input flags resolve indirection
+      // (`F=.env; openssl -in $F`); outputs (-keyout/-out) stay unflagged.
       for (let i = 0; i < args.length; i++) {
         if (OPENSSL_INPUT_FLAGS.has(args[i]) && args[i + 1]) {
-          const cls = classifyToken(normalizePathToken(args[i + 1]))
-          if (cls.tier !== "pass") classified.push({ token: basenameOf(normalizePathToken(args[i + 1])), ...cls })
+          const raw = args[i + 1]
+          const cands = [normalizePathToken(raw)]
+          for (const v of varRefs(String(raw))) {
+            const val = resolveAssigned(v)
+            if (val) cands.push(normalizePathToken(val))
+          }
+          for (const nc of [...new Set(cands.filter(Boolean))]) {
+            const cls = classifyToken(nc)
+            if (cls.tier !== "pass") {
+              classified.push({ token: basenameOf(nc), ...cls })
+              break
+            }
+          }
         }
       }
     } else {
@@ -2172,6 +2241,151 @@ export function analyzeCommand(policy, command, opts = {}) {
       }
     }
 
+    // ---- F3 (2026-09-04e): writes into guarded destinations via shell ----
+    // `edit`/`write` tools gate these paths; shell file-management and
+    // redirections must match tiers, or `cp /tmp/evil ~/.ssh/config` plants
+    // trust silently. Scope (FP-safe):
+    //   - ask-tier dests (startup files, kubeconfig, .secrets, ...) -> ask
+    //   - directory-form deny dests (.ssh/.aws/.kube/... members) -> block
+    // File-form deny dests (.env/.key/.pem/.tfstate/...) stay silent so
+    // `cp .env.example .env` and key generation keep working (NEG-EXC-004).
+    {
+      const writeDests = []
+      const pushDest = (t) => {
+        if (!t) return
+        // Resolve variable indirection (`D=~/.zshenv; echo hi > $D`).
+        const cands = [normalizePathToken(t)]
+        for (const v of varRefs(String(t))) {
+          const val = resolveAssigned(v)
+          if (val) cands.push(normalizePathToken(val))
+        }
+        for (const nc of [...new Set(cands.filter(Boolean))]) {
+          if (!nc.startsWith("-")) writeDests.push(nc)
+        }
+      }
+      // Redirection targets: `>`, `>>`, `2>`, `2>>`.
+      for (let i = 0; i < toks.length; i++) {
+        const d = unquote(toks[i])
+        const m = d.match(/^[0-9]*>>?(.*)$/)
+        if (!m) continue
+        const inline = normalizePathToken(m[1])
+        pushDest(inline || (toks[i + 1] ? normalizePathToken(unquote(toks[i + 1])) : ""))
+      }
+      // `-o`/`-O`/`--output` values.
+      for (let i = 0; i < args.length; i++) {
+        const d = unquote(args[i])
+        let val = null
+        if (["-o", "-O", "--output", "--output-document", "-out"].includes(d)) val = unquote(args[i + 1] ?? "")
+        else if (/^(?:--output|--output-document|-out)=/.test(d)) val = d.slice(d.indexOf("=") + 1)
+        if (val) pushDest(normalizePathToken(val))
+      }
+      if (EDITOR_VERBS.has(verb) || verb === "patch") {
+        for (const w of args) {
+          const t = normalizePathToken(String(w))
+          if (t && !t.startsWith("-")) pushDest(t)
+        }
+      }
+      if (
+        (verb === "perl" || verb === "ruby" || verb === "awk" || verb === "gawk") &&
+        args.some((a) => /^-[A-Za-z]*i/.test(unquote(String(a))))
+      ) {
+        for (const w of args) {
+          const t = normalizePathToken(String(w))
+          if (t && !t.startsWith("-")) pushDest(t)
+        }
+      }
+      // `tee` writes every file operand; `dd` only its `of=`/`out=` target
+      // (`if=` is a read source, not a write).
+      if (verb === "tee") {
+        for (const w of args) {
+          const t = normalizePathToken(String(w))
+          if (t && !t.startsWith("-")) pushDest(t)
+        }
+      }
+      if (verb === "dd") {
+        for (const w of args) {
+          const m2 = String(w).match(/^(?:of|out)=(.*)$/i)
+          if (m2) pushDest(normalizePathToken(m2[1]))
+        }
+      }
+      // Copy/move shapes: only the LAST path is the write destination.
+      // Sources are copy-staging (provenance), never write violations, so
+      // `cp .env.example .env` keeps working.
+      if (MOVE_LIKE_VERBS.has(verb)) {
+        for (let i = args.length - 1; i >= 0; i--) {
+          const t = normalizePathToken(args[i])
+          if (t && !t.startsWith("-")) {
+            pushDest(t)
+            break
+          }
+        }
+      } else if (COPY_LIKE_VERBS.has(verb) || verb === "ln") {
+        for (let i = args.length - 1; i >= 0; i--) {
+          const t = normalizePathToken(args[i])
+          if (t && !t.startsWith("-")) {
+            pushDest(t)
+            break
+          }
+        }
+      }
+      if (verb === "sed" && args.some((a) => /^-[A-Za-z]*i/.test(String(a)))) {
+        for (const w of args) {
+          const t = normalizePathToken(w)
+          if (t && !t.startsWith("-")) pushDest(t)
+        }
+      }
+      // Removal of guarded material is tampering too (`rm ~/.ssh/config`);
+      // `chmod`/`chown` stay silent (NEG-EXC-008 permission hardening).
+      if (verb === "rm" || verb === "shred") {
+        for (const w of args) {
+          const t = normalizePathToken(String(w))
+          if (t && !t.startsWith("-")) pushDest(t)
+        }
+      }
+      for (const cand of writeDests) {
+        const cls = classifyPath(policy, cand, { promoteAskToDenyIds: promote })
+        if (cls.tier === "pass") continue
+        if (cls.tier === "ask") {
+          return {
+            decision: "ask",
+            ruleId: "GGW-SHELL-WRITE-002",
+            category: "guard-write",
+            reason: "shell write into approval-gated destination (" + cls.reason + ")",
+            matched: basenameOf(cand),
+            pathRule: cls.ruleId,
+          }
+        }
+        const rule = findPolicyRule(policy, cls.ruleId)
+        // The winning rule may be file-form (`~/.ssh/id_rsa` matches basename
+        // id_rsa first) while the dest still sits inside a guarded store.
+        // Classify the parent directory: a dir-form deny there enforces too.
+        // File-form dests elsewhere (`.env`, `server.key`) stay silent so
+        // project setup keeps working.
+        let inStore = isDirFormRule(rule)
+        if (!inStore) {
+          const trimmed = String(cand).replace(/\/+$/, "")
+          const slash = trimmed.lastIndexOf("/")
+          const parent = slash === -1 ? "" : trimmed.slice(0, slash) || "/"
+          if (parent) {
+            const pc = classifyPath(policy, parent, { promoteAskToDenyIds: promote })
+            if (pc.tier === "deny" && isDirFormRule(findPolicyRule(policy, pc.ruleId))) {
+              inStore = true
+            }
+          }
+        }
+        if (inStore) {
+          return {
+            decision: "block",
+            ruleId: "GGW-SHELL-WRITE-001",
+            category: "guard-write",
+            reason: "shell write into protected store (" + cls.reason + ")",
+            matched: basenameOf(cand),
+            pathRule: cls.ruleId,
+          }
+        }
+      }
+    }
+
     const worst = (tier) => classified.find((c) => c.tier === tier)
     const denyHit = worst("deny")
     const askHit = worst("ask")
@@ -2209,33 +2423,58 @@ export function analyzeCommand(policy, command, opts = {}) {
       }
     }
     if (classified.length && FILE_MANAGEMENT_VERBS.has(verb)) {
+      // F1 (2026-09-04e): resolve variable indirection so `F=.env; cp $F
+      // /tmp/x` tracks its destination like the literal does.
+      const trackVariants = (tok) => {
+        const out2 = [normalizePathToken(tok)]
+        for (const v of varRefs(String(tok))) {
+          const val = resolveAssigned(v)
+          if (val) out2.push(normalizePathToken(val))
+        }
+        return [...new Set(out2.filter(Boolean))]
+      }
       let srcIdx = -1
       let srcHit = null
       let srcNorm = ""
       for (let wi = 1; wi < words.length; wi++) {
-        const norm = normalizePathToken(words[wi])
-        if (!norm || !looksLikePath(norm)) continue
-        const cls = classifyToken(norm)
-        if (cls.tier !== "pass") {
+        let found = null
+        for (const norm of trackVariants(words[wi])) {
+          if (!norm || !looksLikePath(norm)) continue
+          const cls = classifyToken(norm)
+          if (cls.tier !== "pass") {
+            found = { cls, norm }
+            break
+          }
+        }
+        if (found) {
           srcIdx = wi
-          srcHit = cls
-          srcNorm = norm
+          srcHit = found.cls
+          srcNorm = found.norm
           break
         }
       }
       if (srcHit) {
         for (let wi = words.length - 1; wi > srcIdx; wi--) {
-          const norm = normalizePathToken(words[wi])
-          if (!norm || norm.startsWith("-")) continue
-          if (classifyPath(policy, norm).tier === "pass") {
+          const all = trackVariants(words[wi])
+          const concrete = all.filter((n) => !n.includes("$"))
+          const pool = concrete.length ? concrete : all
+          let destCand = null
+          for (const norm of pool) {
+            if (!norm || norm.startsWith("-")) continue
+            if (classifyPath(policy, norm).tier === "pass") {
+              destCand = norm
+              break
+            }
+          }
+          if (destCand) {
             const srcRule = findPolicyRule(policy, srcHit.ruleId)
             const dirProp =
               isDirFormRule(srcRule) && basenameOf(srcNorm) === srcRule.value
             const dest = dirProp
-              ? norm
-              : norm.endsWith("/")
-                ? norm.replace(/\/+$/, "") + "/" + basenameOf(srcNorm)
-                : norm
+              ? destCand
+              : destCand.endsWith("/")
+                ? destCand.replace(/\/+$/, "") + "/" + basenameOf(srcNorm)
+                : destCand
             copies.push({ token: dest, tier: srcHit.tier, ruleId: srcHit.ruleId, dir: dirProp })
             break
           }
@@ -2316,6 +2555,41 @@ export function analyzeCommand(policy, command, opts = {}) {
         const plainAsk = classified.find((c) => c.tier === "ask" && !c.explicit)
         if (plainAsk && !METADATA_VERBS.has(verb) && !PRINTERS.has(verb)) {
           return verdict(plainAsk, "GGR-OTHER-002", "unrecognized operation references approval-gated material", plainAsk.token)
+        }
+      }
+    }
+
+    // ---- F2 (2026-09-04e): executed file bodies with non-script names -----
+    // `python /tmp/job.txt` where job.txt holds `open(".env")` is invisible
+    // to argument analysis. Read the operand (bounded, injected by the caller
+    // so the pure engine stays testable) and scan for direct refs and tracked
+    // copies — this also closes reverse-order indirection (payload written
+    // before the copy exists). Script-shaped operands (*.py/*.sh/...) keep
+    // write-time-only gating so approved project scripts and
+    // `bash install.sh` keep working (NEG-FP-061).
+    if (!classified.length && typeof opts.readFile === "function") {
+      const bodyFile = interpreterBodyOperand(verb, args)
+      if (bodyFile && !looksLikeScript(bodyFile) && !looksLikeCarrierScript(bodyFile)) {
+        let body = null
+        try {
+          body = opts.readFile(bodyFile)
+        } catch {
+          body = null
+        }
+        if (body) {
+          const hit = scanBodyForProtected(policy, body, [...copies, ...(opts.knownCopies ?? [])], promote)
+          if (hit) {
+            return {
+              decision: hit.tier === "deny" ? "block" : "ask",
+              ruleId: hit.tracked ? "GGR-LANG-003" : "GGR-LANG-002",
+              category: "semantic-bypass",
+              reason: hit.tracked
+                ? "executed file body references a temporary copy of protected material"
+                : "executed file body references protected material the command line does not name",
+              matched: hit.name,
+              pathRule: hit.pathRule,
+            }
+          }
         }
       }
     }
@@ -2836,6 +3110,67 @@ function looksLikeScript(path, content) {
   return SCRIPT_EXT_RE.test(String(path ?? "")) || /^#!.*\b(sh|bash|zsh|python[0-9.]*|node|ruby|perl|php|env)\b/.test(String(content ?? "").slice(0, 64))
 }
 
+/**
+ * Code-shape signals for extension-mismatched payloads (F2, 2026-09-04e).
+ * A `.txt`/extensionless file carrying `open(".env")` plus `import` is
+ * executable the moment `python` names it, but the write-time script check
+ * never saw it (no script extension, no shebang). Bare reader verbs
+ * (`cat `/`curl`) are deliberately EXCLUDED so prose like
+ * "Run `cat .env` to debug." in markdown stays silent (engine.test.js).
+ */
+const EXECUTABLE_CONTENT_RE = /open\s*\(|readFileSync|readFile\s*\(|require\s*\(|import\s+\w|from\s+\S+\s+import|os\.environ|process\.env|Deno\.env|getenv\s*\(|system\s*\(|exec\s*\(|eval\s*\(|subprocess|child_process|execSync|__import__|console\.|print\s*\(|BEGIN\s*\{|getline|file_get_contents|Get-Content|Invoke-/i
+function looksLikeExecutableContent(content) {
+  return EXECUTABLE_CONTENT_RE.test(String(content ?? "").slice(0, 8000))
+}
+
+/**
+ * File operand of an interpreter invocation, or null. Inline-code flags
+ * (`-c`/`-e`) mean the body is on the command line (already analyzed).
+ * Shells return null: unknown carriers are gated separately (GGH-STDIN-001)
+ * and shaped operands keep write-time-only gating (NEG-FP-061).
+ */
+function interpreterBodyOperand(verb, args) {
+  if (SHELL_REEXEC_VERBS.has(verb)) return null
+  if (!INTERPRETERS.has(verb)) return null
+  const deq = (a) => shellDequote(String(a))
+  if (args.some((a) => /^(-c|-[A-Za-z]*e|--eval|--execute)$/.test(deq(a)))) return null
+  if (verb === "awk" || verb === "gawk") {
+    for (let i = 0; i < args.length; i++) {
+      if (deq(args[i]) === "-f" && args[i + 1]) return shellDequote(String(args[i + 1]))
+    }
+    return null
+  }
+  for (const a of args) {
+    const d = deq(a)
+    if (!d || d.startsWith("-")) continue
+    return d
+  }
+  return null
+}
+
+/**
+ * Scan an executed file's body for protected refs (direct) and session-tracked
+ * copies (forward AND reverse-order indirection). Returns null when clean.
+ */
+function scanBodyForProtected(policy, body, copies, promote) {
+  const text = String(body ?? "").slice(0, 32768)
+  if (!text) return null
+  const hits = embeddedProtectedHits(policy, text)
+  if (hits.length) {
+    return { tier: hits[0].tier, pathRule: hits[0].ruleId, name: hits[0].name, tracked: false }
+  }
+  if (copies?.length) {
+    const low = text.toLowerCase()
+    for (const k of copies) {
+      const t = normalizePathToken(String(k.token ?? "")).toLowerCase()
+      if (t && low.includes(t)) {
+        return { tier: k.tier, pathRule: k.ruleId, name: basenameOf(k.token), tracked: true }
+      }
+    }
+  }
+  return null
+}
+
 /** Carrier files carry executable bodies in embedded strings. */
 function looksLikeCarrierScript(path) {
   return CARRIER_SCRIPT_RE_COMPILED.test(String(path ?? "")) || CARRIER_WORKFLOW_RE.test(String(path ?? ""))
@@ -2883,7 +3218,7 @@ export function decideToolCall(policy, toolCall, opts = {}) {
   }
   switch (toolCall.kind) {
     case "shell":
-      return analyzeCommand(policy, toolCall.command, { resolvePath: opts.resolvePath, promoteAskToDenyIds: policy.promoteAskToDenyIds ?? [], knownCopies })
+      return analyzeCommand(policy, toolCall.command, { resolvePath: opts.resolvePath, readFile: opts.readFile, promoteAskToDenyIds: policy.promoteAskToDenyIds ?? [], knownCopies })
     case "path": {
       // E2: reads of session-tracked copies escalate like the source tier,
       // mirroring single-command `cp && cat` behavior. Writes are left to
@@ -2923,22 +3258,57 @@ export function decideToolCall(policy, toolCall, opts = {}) {
         // Carrier files (package.json scripts, Makefiles, workflows) carry
         // executable bodies in embedded strings and have neither a script
         // extension nor a shebang.
-        if (
-          toolCall.mode === "write" &&
-          (looksLikeScript(toolCall.path, toolCall.content) || looksLikeCarrierScript(toolCall.path))
-        ) {
-          const hits = embeddedProtectedHits(policy, toolCall.content)
-          if (hits.length && !contentWriteAllowlisted(policy, toolCall.path)) {
-            const first = hits[0]
-            return {
-              decision: "ask",
-              ruleId: first.tier === "deny" ? "GGW-CONTENT-001" : "GGW-CONTENT-002",
-              category: "deferred-execution",
-              reason:
-                first.tier === "deny"
-                  ? "script content references protected material the guard cannot inspect when the script later runs"
-                  : "script content references approval-gated material the guard cannot inspect when the script later runs",
-              matched: first.name,
+        if (toolCall.mode === "write" && !contentWriteAllowlisted(policy, toolCall.path)) {
+          if (looksLikeScript(toolCall.path, toolCall.content) || looksLikeCarrierScript(toolCall.path)) {
+            const hits = embeddedProtectedHits(policy, toolCall.content)
+            if (hits.length) {
+              const first = hits[0]
+              return {
+                decision: "ask",
+                ruleId: first.tier === "deny" ? "GGW-CONTENT-001" : "GGW-CONTENT-002",
+                category: "deferred-execution",
+                reason:
+                  first.tier === "deny"
+                    ? "script content references protected material the guard cannot inspect when the script later runs"
+                    : "script content references approval-gated material the guard cannot inspect when the script later runs",
+                matched: first.name,
+              }
+            }
+          } else {
+            // F2 (2026-09-04e): extension-mismatched payloads (`/tmp/job.txt`
+            // with python code). The code-shape gate keeps prose silent.
+            const hits = embeddedProtectedHits(policy, toolCall.content)
+            if (hits.length && looksLikeExecutableContent(toolCall.content)) {
+              const first = hits[0]
+              return {
+                decision: "ask",
+                ruleId: first.tier === "deny" ? "GGW-CONTENT-003" : "GGW-CONTENT-004",
+                category: "deferred-execution",
+                reason:
+                  first.tier === "deny"
+                    ? "file content looks executable and references protected material the guard cannot inspect when the file later runs"
+                    : "file content looks executable and references approval-gated material the guard cannot inspect when the file later runs",
+                matched: first.name,
+              }
+            }
+          }
+          // Content referencing a session-tracked copy (forward-order
+          // indirection: `cp .env /tmp/x` then `write evil.js` reading it).
+          if (knownCopies.length && typeof toolCall.content === "string") {
+            const bodyLow = toolCall.content.toLowerCase()
+            const hit = knownCopies.find((k) => {
+              const t = normalizePathToken(String(k.token ?? "")).toLowerCase()
+              return t && bodyLow.includes(t)
+            })
+            if (hit) {
+              return {
+                decision: "ask",
+                ruleId: hit.tier === "deny" ? "GGW-CONTENT-003" : "GGW-CONTENT-004",
+                category: "deferred-execution",
+                reason: "file content references a temporary copy of protected material",
+                matched: basenameOf(hit.token),
+                pathRule: hit.ruleId,
+              }
             }
           }
         }
@@ -3049,7 +3419,7 @@ export function decidePermissionEvent(policy, action, resources, opts = {}) {
   const knownCopies = opts.knownCopies ?? []
   for (const res of resources) {
     if (action === "shell") {
-      const r = analyzeCommand(policy, String(res), { resolvePath: opts.resolvePath, promoteAskToDenyIds: policy.promoteAskToDenyIds ?? [], knownCopies })
+      const r = analyzeCommand(policy, String(res), { resolvePath: opts.resolvePath, readFile: opts.readFile, promoteAskToDenyIds: policy.promoteAskToDenyIds ?? [], knownCopies })
       if (r) return r
       continue
     }
@@ -3236,7 +3606,7 @@ export function applyGuardOverride(basePolicy, override) {
 // OpenCode V2 adapter
 // ============================================================================
 
-import { mkdirSync, writeFileSync, readFileSync, realpathSync } from "node:fs"
+import { mkdirSync, writeFileSync, readFileSync, realpathSync, statSync } from "node:fs"
 import { homedir } from "node:os"
 import path from "node:path"
 
@@ -3317,6 +3687,22 @@ export default {
     // are never recorded; cleared on `rm` and on clean-source overwrite.
     const copyStore = createCopyProvenanceStore({ maxEntries: 32 })
 
+    // F2 (2026-09-04e): bounded file-body reader for executed-file inspection.
+    // Sync, capped (32 KiB, regular files only), never throws into hooks.
+    const readBody = (p) => {
+      try {
+        if (typeof p !== "string" || !p) return null
+        const expanded =
+          p === "~" ? homedir() : p.startsWith("~/") ? path.join(homedir(), p.slice(2)) : p
+        if (!expanded) return null
+        const st = statSync(expanded, { throwIfNoEntry: false })
+        if (!st || !st.isFile() || st.size > 32768) return null
+        return readFileSync(expanded, "utf8").slice(0, 32768)
+      } catch {
+        return null
+      }
+    }
+
     // Symlink/alias defense: resolve on-disk targets so benign-named links
     // onto protected material are classified by what they really are.
     // `~` is expanded first — realpathSync does not understand it, so without
@@ -3360,7 +3746,7 @@ export default {
       }
 
       const norm = normalizeToolCall(event.tool, event.input ?? {})
-      const v = decideToolCall(policy, norm, { resolvePath, knownCopies: copyStore.entries() })
+      const v = decideToolCall(policy, norm, { resolvePath, readFile: readBody, knownCopies: copyStore.entries() })
       if (v && v.decision === "block") {
         writeHeartbeat({ phase: "running", lastDecision: v.ruleId })
         throw new Error(formatVerdict(v))
@@ -3480,7 +3866,7 @@ export default {
         return
       }
 
-      const v = decidePermissionEvent(policy, event.action, event.resources, { resolvePath, knownCopies: copyStore.entries() })
+      const v = decidePermissionEvent(policy, event.action, event.resources, { resolvePath, readFile: readBody, knownCopies: copyStore.entries() })
       if (!v) return
       if (v.decision === "block") {
         event.effect = "deny"
