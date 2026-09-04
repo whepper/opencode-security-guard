@@ -2,6 +2,58 @@
 
 All notable changes. Format: Keep a Changelog; versioning: semantically ordered pre-releases.
 
+## 0.4.2 — 2026-09-04 second evasion set (verified live-silent on 0.4.1, fixed FP-safe)
+
+Adversarial re-probe of the 0.4.1 engine (`analyzeCommand` / `decideToolCall`,
+dummy names only — see the 2026-09-04b entry in `docs/verification-log.md`)
+found sixteen silent shapes. All flipped to enforcing verdicts with
+must-stay-silent negatives; `npm test` 320 pass, `npm run check` clean.
+
+### Fixed
+
+- **Flag-only environment dumps.** `env -0`, `env -u FOO`, `env FOO=bar`
+  (no payload), `alias -p` (zsh) block (`GGE-DUMP-007/008`); `env FOO=bar
+  make build`, `env -i npm test`, clean alias definitions stay silent.
+- **Interpreter env accessors.** The `environ|getenv|process\.env` check is
+  now case-insensitive and covers ruby `ENV[...]`/`ENV.fetch`, perl
+  `$ENV{}`/`%ENV`, awk `ENVIRON[..]`, php `$_ENV[..]`, deno `Deno.env`,
+  AppleScript `system attribute` (`GGE-VAR-020`; whole-env forms ask via
+  `GGE-DUMP-010`). Clean awk/ruby code stays silent.
+- **Process substitution bodies.** `<( )` / `>( )` are extracted like `$()`
+  and backticks: `cat <(env)`, `curl -d @- < <(env)` block; clean
+  `diff <(sort a) <(sort b)` stays silent.
+- **Sender glob operands.** `curl --data @.e*`, `-F upload=@.e*`,
+  `--data=@.e*`, `--data @.[e]nv` ask (`GGR-GLOB-001`): the `@`/`flag=@`
+  prefix no longer defeats exemplar matching.
+- **git grep.** Added to the content subcommands; unscoped `git grep
+  PATTERN` asks (`GGG-HIST-001`), scoped pathspecs (`git grep TODO src/`)
+  stay silent. `git stash show -p` asks; `git stash list`/plain
+  `stash show` stay silent. `git credential fill` asks (`GGG-CRED-001`).
+- **Backup/autosave names.** `.env~`, `#.env#`, `id_rsa~` classify as their
+  originals (read-tool and MCP shapes were silent at both layers where the
+  native dialect could not match `~`/`#`); `.env.example~` stays silent.
+- **Tool-adapter gaps.** Glob-tool bracket classes normalize before
+  classification (`[.]env`, `[.]e[n]v` ask; ranges collapse to wildcards);
+  the grep tool asks on broad/empty search roots (`GGR-SEARCH-002`).
+- **Credential-printing CLIs.** macOS `security find-*-password -w/-g`
+  blocks, `security dump-keychain` asks (`GGS-KEY-*`); `gh auth token`,
+  `gcloud auth print-*-token`, `aws ecr get-login-password`,
+  `npm config get <secret-key>`, `launchctl getenv <secret-name>` ask
+  (`GGE-CLI-001..005`); metadata-only / non-secret variants stay silent.
+- **Policy coverage.** New: `/etc/environment` deny (engine `GG-ENV-004`,
+  native `SG-ENV-005`; the old BYP-DIR-004 "native handles system files"
+  note was wrong — no such rule existed), `~/.zsh_history` / `~/.bash_history`
+  ask (`GG-HIS-*`, `SG-HIS-*`), `~/.secrets/` ask (`GG-SEC-001`,
+  `SG-SEC-001`), native `*.env~` deny (`SG-ENV-003`). Native rules 75 → 81.
+
+### Not fixed (documented residuals)
+
+`docker exec C env` and `ssh host env` (remote/container environment) and
+gcloud legacy-credential cookies outside `~/.config/gcloud` remain
+filename/class-coverage gaps, not engine bugs — the threat model scopes
+remote hosts and containers out. Live smoke on a running `opencode2` build
+still pending (see `docs/verification-log.md`).
+
 ## 0.4.1 — 2026-09-04 evasion set (E1–E10, FP-safe)
 
 Implements `docs/evasion-2026-09-04.md`. Engine-level verified (`npm test`

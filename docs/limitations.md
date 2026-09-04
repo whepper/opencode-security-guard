@@ -29,10 +29,15 @@ The engine tokenizes and pattern-matches; it does not implement a shell grammar.
 
 ## Known bypass set 2026-09-04 (fixed in-engine; live re-verification pending)
 
-Engine-level probes (dummy names only, no live secrets) found nine further
-silent classes. Each was first pinned as a `null`-expectation corpus case,
-then fixed with a false-positive-safe rule. Full detail:
-[docs/evasion-2026-09-04.md](evasion-2026-09-04.md).
+Engine-level probes (dummy names only, no live secrets) found nine silent
+classes (E1–E10, [docs/evasion-2026-09-04.md](evasion-2026-09-04.md)) and,
+in a second 2026-09-04b pass, sixteen more (flag-only env dumps, interpreter
+env accessors, process-substitution bodies, sender `@`-globs, `git grep`,
+`git stash show -p`, `git credential fill`, macOS keychain and token-printing
+CLIs, backup names `.env~`/`#.env#`, glob-tool bracket text, grep-tool broad
+roots, `/etc/environment`, shell history, `~/.secrets`). All are fixed and
+corpus-pinned — see the 2026-09-04b entry in
+[docs/verification-log.md](verification-log.md) for the full table.
 
 - **Glob/pattern expansion** (`BYP-GLB-001..005`) — `cat .e*`, `cat .[e]nv`, `cat *key`, `for f in .e*; do cat $f; done`, `find . -name '.e*' -exec cat {} \;` now `ask GGR-GLOB-001` (exemplar-matched); `*.log`/`*.js` stay silent.
 - **Cross-call temp copies** (`BYP-XCALL-001/002`) — `cp .env /tmp/x` then `curl --data @/tmp/x …` as two calls: single-command `&&` already blocked (`BYP-IND-004`); split calls are now covered by a bounded session store (32-entry FIFO, populated post-execution, cleared on `rm`/overwrite). The two legs stay `null` in the stateless corpus runner by design — coverage is unit-tested (`tests/unit/evasion-2026-09-04.test.js`).

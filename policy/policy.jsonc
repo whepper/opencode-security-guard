@@ -148,6 +148,10 @@
 
     { "id": "SG-PROC-001", "action": "read", "resource": "*proc/*environ*", "effect": "deny",
       "reason": "procfs process environment (e.g. /proc/self/environ) exposes secrets regardless of filename; scoped to /proc/ so docs/environ.md stays allowed." },
+    { "id": "SG-ENV-003", "action": "read", "resource": "*.env~", "effect": "deny",
+      "reason": "Editor/backup variants of .env (vim `file~`, cp backups) carry the same secrets; basename suffix rules miss the tilde. (Emacs `#.env#` autosaves are engine-covered only: '#' is not expressible in V2 resource patterns.)" },
+    { "id": "SG-ENV-005", "action": "read", "resource": "*etc/environment", "effect": "deny",
+      "reason": "/etc/environment holds system-wide credential-bearing env assignments; matches absolute and relative forms." },
 
     // Writes into never-legitimate-to-modify stores (edit covers edit/write/patch)
     { "id": "SG-WRT-001", "action": "edit", "resource": "*.ssh/*", "effect": "deny",
@@ -217,6 +221,12 @@
 
     { "id": "SG-PROC-002", "action": "read", "resource": "*proc/*cmdline*", "effect": "ask",
       "reason": "procfs command lines may embed secrets; scoped to /proc/ to avoid flagging project files." },
+    { "id": "SG-HIS-001", "action": "read", "resource": "*.zsh_history", "effect": "ask",
+      "reason": "Shell history files accumulate past exports and command lines, including secrets typed earlier (incident-adjacent class)." },
+    { "id": "SG-HIS-002", "action": "read", "resource": "*.bash_history", "effect": "ask",
+      "reason": "Shell history files accumulate past exports and command lines, including secrets typed earlier (incident-adjacent class)." },
+    { "id": "SG-SEC-001", "action": "read", "resource": "*.secrets/*", "effect": "ask",
+      "reason": "A directory named .secrets is a strong but nonstandard signal (the standard store is ~/.config/secrets, already denied); human judgment decides." },
 
     // ---- 4. Safe exceptions — MUST remain the final section ------------------
     // Last-match-wins makes these override everything above. Adding rules
@@ -348,7 +358,11 @@
     "**/.git-credentials",
     "**/.zshenv",
     "**/.zprofile",
-    "**/.bash_profile"
+    "**/.bash_profile",
+    "**/*.env~",
+    "**/.zsh_history",
+    "**/.bash_history",
+    "**/.secrets/**"
   ],
 
   // ---------------------------------------------------------------------------
@@ -393,7 +407,8 @@
       { "id": "GG-PKG-003", "form": "basename", "value": ".pypirc", "reason": "PyPI credentials" },
       { "id": "GG-PKG-004", "form": "basename", "value": ".git-credentials", "reason": "git credential store" },
       { "id": "GG-MISC-001", "form": "basename", "value": "auth.json", "reason": "generic auth store" },
-      { "id": "GG-PROC-001", "form": "withinDir", "value": "environ", "withinDir": "proc", "reason": "procfs process environment exposes secrets regardless of filename (scoped to /proc/ so docs/environ.md stays allowed)" }
+      { "id": "GG-PROC-001", "form": "withinDir", "value": "environ", "withinDir": "proc", "reason": "procfs process environment exposes secrets regardless of filename (scoped to /proc/ so docs/environ.md stays allowed)" },
+      { "id": "GG-ENV-004", "form": "withinDir", "value": "environment", "withinDir": "etc", "reason": "/etc/environment holds system-wide env assignments including credentials (scoped so project environment.md files stay allowed)" }
     ],
 
     // Approval-gated paths: dangerous enough to interrupt, ambiguous enough
@@ -407,7 +422,10 @@
       { "id": "GG-RC-006", "form": "basename", "value": ".bash_profile", "reason": "shell startup file" },
       { "id": "GG-RC-007", "form": "basename", "value": ".profile", "reason": "shell startup file" },
       { "id": "GG-AMB-011", "form": "contains", "value": "kubeconfig", "reason": "cluster credential file outside the standard ~/.kube directory" },
-      { "id": "GG-PROC-002", "form": "withinDir", "value": "cmdline", "withinDir": "proc", "reason": "procfs command lines may embed secrets (scoped to /proc/)" }
+      { "id": "GG-PROC-002", "form": "withinDir", "value": "cmdline", "withinDir": "proc", "reason": "procfs command lines may embed secrets (scoped to /proc/)" },
+      { "id": "GG-HIS-001", "form": "basename", "value": ".zsh_history", "reason": "shell history accumulates past exports and secret-bearing command lines" },
+      { "id": "GG-HIS-002", "form": "basename", "value": ".bash_history", "reason": "shell history accumulates past exports and secret-bearing command lines" },
+      { "id": "GG-SEC-001", "form": "dir", "value": ".secrets", "reason": "nonstandard dedicated secret directory; ask-tier because the name is a strong signal but placement is user-defined" }
     ],
 
     // Safe re-allows evaluated AFTER denyPaths/askPaths in the engine.

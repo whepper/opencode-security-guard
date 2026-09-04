@@ -49,7 +49,11 @@
     "**/.git-credentials",
     "**/.zshenv",
     "**/.zprofile",
-    "**/.bash_profile"
+    "**/.bash_profile",
+    "**/*.env~",
+    "**/.zsh_history",
+    "**/.bash_history",
+    "**/.secrets/**"
     ]
   },
 
@@ -135,6 +139,10 @@
     { "action": "read", "resource": "*.git-credentials", "effect": "deny" },
     // SG-PROC-001: procfs process environment (e.g. /proc/self/environ) exposes secrets regardless of filename; scoped to /proc/ so docs/environ.md stays allowed.
     { "action": "read", "resource": "*proc/*environ*", "effect": "deny" },
+    // SG-ENV-003: Editor/backup variants of .env (vim `file~`, cp backups) carry the same secrets; basename suffix rules miss the tilde. (Emacs `#.env#` autosaves are engine-covered only: '#' is not expressible in V2 resource patterns.)
+    { "action": "read", "resource": "*.env~", "effect": "deny" },
+    // SG-ENV-005: /etc/environment holds system-wide credential-bearing env assignments; matches absolute and relative forms.
+    { "action": "read", "resource": "*etc/environment", "effect": "deny" },
     // SG-WRT-001: Agent must never modify SSH material (e.g. planting authorized_keys or overwriting keys).
     { "action": "edit", "resource": "*.ssh/*", "effect": "deny" },
     // SG-WRT-002: Agent must never modify cloud credential stores.
@@ -195,6 +203,12 @@
     { "action": "read", "resource": "*api_key*", "effect": "ask" },
     // SG-PROC-002: procfs command lines may embed secrets; scoped to /proc/ to avoid flagging project files.
     { "action": "read", "resource": "*proc/*cmdline*", "effect": "ask" },
+    // SG-HIS-001: Shell history files accumulate past exports and command lines, including secrets typed earlier (incident-adjacent class).
+    { "action": "read", "resource": "*.zsh_history", "effect": "ask" },
+    // SG-HIS-002: Shell history files accumulate past exports and command lines, including secrets typed earlier (incident-adjacent class).
+    { "action": "read", "resource": "*.bash_history", "effect": "ask" },
+    // SG-SEC-001: A directory named .secrets is a strong but nonstandard signal (the standard store is ~/.config/secrets, already denied); human judgment decides.
+    { "action": "read", "resource": "*.secrets/*", "effect": "ask" },
     // SG-EXC-001: Sanitized template by strong convention; explicitly permitted by project goals.
     { "action": "read", "resource": "*.env.example", "effect": "allow" },
     // SG-EXC-002: Sanitized template variant.

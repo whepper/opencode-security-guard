@@ -210,6 +210,13 @@ export const GENERATED_GUARD_POLICY = Object.freeze({
       "value": "environ",
       "withinDir": "proc",
       "reason": "procfs process environment exposes secrets regardless of filename (scoped to /proc/ so docs/environ.md stays allowed)"
+    },
+    {
+      "id": "GG-ENV-004",
+      "form": "withinDir",
+      "value": "environment",
+      "withinDir": "etc",
+      "reason": "/etc/environment holds system-wide env assignments including credentials (scoped so project environment.md files stay allowed)"
     }
   ],
   "askPaths": [
@@ -267,6 +274,24 @@ export const GENERATED_GUARD_POLICY = Object.freeze({
       "value": "cmdline",
       "withinDir": "proc",
       "reason": "procfs command lines may embed secrets (scoped to /proc/)"
+    },
+    {
+      "id": "GG-HIS-001",
+      "form": "basename",
+      "value": ".zsh_history",
+      "reason": "shell history accumulates past exports and secret-bearing command lines"
+    },
+    {
+      "id": "GG-HIS-002",
+      "form": "basename",
+      "value": ".bash_history",
+      "reason": "shell history accumulates past exports and secret-bearing command lines"
+    },
+    {
+      "id": "GG-SEC-001",
+      "form": "dir",
+      "value": ".secrets",
+      "reason": "nonstandard dedicated secret directory; ask-tier because the name is a strong signal but placement is user-defined"
     }
   ],
   "exceptionPaths": [
@@ -462,7 +487,7 @@ export const GENERATED_GUARD_POLICY = Object.freeze({
 })
 // ==== END GENERATED GUARD POLICY ====
 
-export const PLUGIN_VERSION = "0.4.1"
+export const PLUGIN_VERSION = "0.4.2"
 export const PLUGIN_ID = "security-guard"
 
 // ============================================================================
@@ -637,6 +662,18 @@ function embeddedProtectedHits(policy, text) {
 }
 
 /**
+ * Editor backup/autosave decorations hide protected basenames from
+ * suffix/prefix matching: `.env~` (vi/cp backups), `#.env#` (emacs
+ * autosaves), `id_rsa~`. The kernel opens these just like their originals.
+ */
+function undecorateBackupName(p) {
+  let t = String(p).replace(/~+$/, "")
+  const m = t.match(/^#(.*)#$/)
+  if (m) t = m[1]
+  return t
+}
+
+/**
  * Classify a filesystem path against the compiled guard policy.
  * Order: hard denies win over exceptions (so a "tokenizer" file inside
  * ~/.aws stays denied); then profile-promoted asks; then asks; then allows;
@@ -649,8 +686,13 @@ function embeddedProtectedHits(policy, text) {
  * (`FOO.PEM` is a misnamed public cert) against a universal bypass class.
  */
 export function classifyPath(policy, rawPath, opts = {}) {
-  const p = normalizePathToken(rawPath).toLowerCase()
+  let p = normalizePathToken(rawPath).toLowerCase()
   if (!p) return { tier: "pass" }
+
+  // A backup/autosave of protected material is protected material: classify
+  // the undecorated basename (`.env~` -> `.env`, `#.env#` -> `.env`).
+  const undec = undecorateBackupName(p)
+  if (undec && undec !== p) p = undec
 
   if (opts.mode === "write") {
     const self = classifySelfProtect(policy, p)
@@ -705,7 +747,7 @@ const SENDER_VERBS = new Set([
   "rsync", "telnet", "socat", "gh", "gsutil", "aws", "az", "gcloud", "huggingface-cli",
 ])
 const ARCHIVE_CREATORS = new Set(["tar", "zip", "jar", "7z", "7za", "ditto"])
-const GIT_CONTENT_SUBCOMMANDS = new Set(["show", "cat-file", "archive", "log", "diff", "whatchanged"])
+const GIT_CONTENT_SUBCOMMANDS = new Set(["show", "cat-file", "archive", "log", "diff", "whatchanged", "grep"])
 // Re-entry wrappers: programs whose ARGUMENTS are themselves a command. Without
 // recursive analysis these defeat every verb-class rule, because the outer verb
 // (`bash`, `eval`, `env`, `sudo`, …) belongs to no class:
@@ -780,26 +822,36 @@ function globToRegExpSrc(glob) {
   return "^" + out + "$"
 }
 function globMayMatchProtected(rawPattern) {
-  const pat = shellDequote(String(rawPattern ?? "").trim()).toLowerCase()
-  if (!pat || !/[*?{\[]/.test(pat)) return null
-  // Skip flag-looking tokens (`--include=*.log` is handled via its value
-  // below; bare `--flag` never matches an exemplar anyway).
-  let full = null
-  try {
-    full = new RegExp(globToRegExpSrc(pat), "i")
-  } catch {
-    return null
+  const pat0 = shellDequote(String(rawPattern ?? "").trim()).toLowerCase()
+  if (!pat0 || !/[*?{\[]/.test(pat0)) return null
+  // curl-style senders hide the glob behind an @ (`--data @.e*`,
+  // `-F upload=@.e*`): the shell expands the pattern, curl opens the result.
+  // Try the plain token first, then the @-stripped and flag=@-sliced forms.
+  const candidates = [pat0]
+  if (pat0.startsWith("@")) candidates.push(pat0.slice(1))
+  const eq = pat0.indexOf("=")
+  if (eq !== -1) {
+    const sliced = pat0.slice(eq + 1).replace(/^@+/, "")
+    if (sliced) candidates.push(sliced)
   }
-  const basePat = basenameOf(pat)
-  let baseRe = null
-  try {
-    baseRe = new RegExp(globToRegExpSrc(basePat), "i")
-  } catch {
-    baseRe = null
-  }
-  for (const ex of GLOB_EXEMPLARS) {
-    if (full.test(ex)) return ex
-    if (baseRe && baseRe.test(basenameOf(ex))) return ex
+  for (const pat of candidates) {
+    let full = null
+    try {
+      full = new RegExp(globToRegExpSrc(pat), "i")
+    } catch {
+      continue
+    }
+    const basePat = basenameOf(pat)
+    let baseRe = null
+    try {
+      baseRe = new RegExp(globToRegExpSrc(basePat), "i")
+    } catch {
+      baseRe = null
+    }
+    for (const ex of GLOB_EXEMPLARS) {
+      if (full.test(ex)) return ex
+      if (baseRe && baseRe.test(basenameOf(ex))) return ex
+    }
   }
   return null
 }
@@ -970,14 +1022,17 @@ function varRefs(tok) {
   return out
 }
 
-/** Extract inner text of $( ... ) and all ` ... ` substitutions. */
+/** Extract inner text of $( ... ), <( ... ), >( ... ) and all ` ... ` substitutions. */
 function substitutions(segment) {
   const out = []
-  let i = 0
   const s = segment
-  while ((i = s.indexOf("$(", i)) !== -1) {
-    let depth = 0
-    let j = i + 1
+  // `$(`, `<(` and `>(` all open a shell-interpreted parenthesized body.
+  // <( ) is process substitution — its body RUNS (e.g. `curl -d @- < <(env)`),
+  // so it must be analyzed like any other command segment.
+  const extractParen = (start) => {
+    // `start` is the index of the opening "("; depth starts at 1.
+    let depth = 1
+    let j = start + 1
     for (; j < s.length; j++) {
       if (s[j] === "(") depth++
       else if (s[j] === ")") {
@@ -985,8 +1040,15 @@ function substitutions(segment) {
         if (depth === 0) break
       }
     }
-    out.push(s.slice(i + 2, j))
-    i = j
+    return [s.slice(start + 1, j), j]
+  }
+  for (const opener of ["$(", "<(", ">("]) {
+    let i = 0
+    while ((i = s.indexOf(opener, i)) !== -1) {
+      const [inner, end] = extractParen(i + 1)
+      if (inner.trim()) out.push(inner)
+      i = end
+    }
   }
   // Every backtick pair, not just the first.
   for (let bt = s.indexOf("`"); bt !== -1; ) {
@@ -1318,6 +1380,30 @@ export function analyzeCommand(policy, command, opts = {}) {
         matched: verb,
       }
     }
+    // Flag-only (or assignment-only) env/alias invocations still dump the
+    // whole environment: `env -0`, `env -u FOO`, `env FOO=bar` (no payload),
+    // `alias -p` (zsh). A real command payload after the flags is re-entry,
+    // analyzed below; `env FOO=bar make build` and `alias ll='ls'` stay
+    // silent. Only `-u`/`--unset` consume the next token here; `-i`, `-0`,
+    // `-P` etc. take none.
+    if (verb === "env" || verb === "alias") {
+      let i = 0
+      for (; i < args.length; i++) {
+        const a = shellDequote(String(args[i]))
+        if (!a.startsWith("-")) break
+        if ((a === "-u" || a === "--unset") && i + 1 < args.length) i++
+      }
+      let assignmentsOnly = true
+      const payload = []
+      for (; i < args.length; i++) {
+        const a = args[i]
+        if (!isAssignment(a)) assignmentsOnly = false
+        payload.push(a)
+      }
+      if (payload.length === 0 || (verb === "env" && assignmentsOnly && payload.length > 0)) {
+        return blockDump(verb === "env" ? "GGE-DUMP-007" : "GGE-DUMP-008", verb)
+      }
+    }
     if ((verb === "set" || verb === "declare" || verb === "typeset" || verb === "local" || verb === "readonly" || verb === "export")) {
       const dashP = args.some((a) => a === "-p")
       const secretArgs = args.filter((a) => !a.startsWith("-")).filter((a) => isSecretEnvName(policy, assignmentName(a + "=")))
@@ -1383,11 +1469,81 @@ export function analyzeCommand(policy, command, opts = {}) {
       }
     }
 
+    // ---- credential-printing CLI shapes -------------------------------------
+    // These commands write a live credential (keychain item, OAuth token,
+    // registry authToken) to STDOUT — i.e. into the transcript. Same exposure
+    // class as environment dumps, but the payload comes from a CLI, not the
+    // process environment. Approval-gated, not denied: scripted-but-legitimate
+    // use exists for each.
+    {
+      const flat = args.map((a) => shellDequote(String(a)))
+      if (verb === "security") {
+        if (flat.some((a) => a === "dump-keychain")) {
+          return {
+            decision: "ask", ruleId: "GGS-KEY-001", category: "credential-cli",
+            reason: "macOS keychain dump exposes stored passwords/tokens; approve only if intended",
+            matched: "security",
+          }
+        }
+        const findSub = flat.find((a) => a === "find-generic-password" || a === "find-internet-password")
+        if (findSub && (flat.includes("-w") || flat.includes("-g"))) {
+          return {
+            decision: "block", ruleId: "GGS-KEY-002", category: "credential-cli",
+            reason: "macOS keychain lookup with secret-data output prints the stored credential to stdout",
+            matched: "security",
+          }
+        }
+      }
+      if (verb === "gh" && flat.includes("auth") && flat.includes("token")) {
+        return {
+          decision: "ask", ruleId: "GGE-CLI-001", category: "credential-cli",
+          reason: "gh auth token prints the GitHub CLI credential to stdout; approve only if intended",
+          matched: "gh",
+        }
+      }
+      if (verb === "gcloud" && flat.some((a) => /^print-(access|refresh|identity)-token$/.test(a))) {
+        return {
+          decision: "ask", ruleId: "GGE-CLI-002", category: "credential-cli",
+          reason: "gcloud auth print-*-token prints a live cloud credential to stdout; approve only if intended",
+          matched: "gcloud",
+        }
+      }
+      if (verb === "aws" && flat.includes("get-login-password")) {
+        return {
+          decision: "ask", ruleId: "GGE-CLI-003", category: "credential-cli",
+          reason: "aws ecr get-login-password prints a registry credential to stdout; approve only if intended",
+          matched: "aws",
+        }
+      }
+      if ((verb === "npm" || verb === "pnpm" || verb === "yarn" || verb === "bun") &&
+        flat[0] === "config" && flat.includes("get") &&
+        flat.some((a) => isSecretEnvName(policy, a))) {
+        return {
+          decision: "ask", ruleId: "GGE-CLI-004", category: "credential-cli",
+          reason: "package-manager config get of a secret-named key prints the auth token to stdout",
+          matched: flat.find((a) => isSecretEnvName(policy, a)),
+        }
+      }
+      if (verb === "launchctl" && flat[0] === "getenv" && isSecretEnvName(policy, flat[1] ?? "")) {
+        return {
+          decision: "ask", ruleId: "GGE-CLI-005", category: "credential-cli",
+          reason: "launchctl getenv prints a secret-named user environment variable",
+          matched: flat[1],
+        }
+      }
+    }
+
     // ---- interpreters touching the process environment ----------------------
-    if (/environ|getenv|process\.env/.test(rawSeg)) {
+    // Accessors across languages: python os.environ, node process.env,
+    // lua/php getenv, ruby ENV["x"]/ENV.fetch, perl $ENV{}/%ENV, awk
+    // ENVIRON[..] (uppercase), php $_ENV[..], deno Deno.env.get, AppleScript
+    // `system attribute`. Case-insensitive; ENV-style accessors need a
+    // non-word char before them (or an opening bracket/dot after) so
+    // ".env"-style FILENAMES never trigger the check.
+    if (/environ|getenv|process\.env|system attribute|deno\.env|(^|[^A-Za-z0-9_])\$?_?ENV\s*[\[.{]|%\s*ENV\b/i.test(rawSeg)) {
       const interpish =
         INTERPRETERS.has(verb) ||
-        /\b(python3?|node|ruby|perl|php|deno|bun)\b/.test(rawSeg)
+        /\b(python3?|node|ruby|perl|php|deno|bun|awk|gawk|mawk)\b/i.test(rawSeg)
       if (interpish) {
         const candidates = rawSeg.match(/\b[A-Z][A-Z0-9_]{2,}\b/g) ?? []
         const secretLiteral = candidates.find((n) => isSecretEnvName(policy, n))
@@ -1756,7 +1912,35 @@ export function analyzeCommand(policy, command, opts = {}) {
     // (`log --oneline`, `show --stat`, `diff --name-only`, `status`) stays
     // silent, as do `--`-scoped invocations.
     if (!classified.length && verb === "git") {
-      const sub = gitSubcommand(args)
+      const deqArg = (a) => shellDequote(String(a))
+      // `git credential fill` prints the STORED credential (password/token)
+      // to stdout — into the transcript. Legitimate in scripts, dangerous
+      // from an agent: approval-gate it.
+      if (gitSubcommand(args) === "credential" && args.includes("fill")) {
+        return {
+          decision: "ask",
+          ruleId: "GGG-CRED-001",
+          category: "credential-cli",
+          reason: "git credential fill prints the stored credential into the transcript; approve only if intended",
+          matched: "credential fill",
+        }
+      }
+      let sub = gitSubcommand(args)
+      // `git stash show -p` displays the stashed patch (may embed secrets);
+      // plain `git stash show` is metadata-only and stays silent.
+      if (sub === "stash") {
+        const idx = args.findIndex((a) => deqArg(a) === "stash")
+        const nested = deqArg(args[idx + 1] ?? "")
+        if ((nested === "show" || nested === "diff") && args.slice(idx + 2).some((a) => ["-p", "--patch"].includes(deqArg(a)))) {
+          return {
+            decision: "ask",
+            ruleId: "GGG-HIST-001",
+            category: "semantic-bypass",
+            reason: "stash patch display may expose secret material committed to the stash; scope or approve",
+            matched: "stash show",
+          }
+        }
+      }
       if (GIT_CONTENT_SUBCOMMANDS.has(sub)) {
         const deq = (a) => shellDequote(String(a))
         const has = (names) => args.some((a) => names.includes(deq(a)))
@@ -1795,6 +1979,16 @@ export function analyzeCommand(policy, command, opts = {}) {
               }
             }
             fire = !hasSpec
+          } else if (sub === "grep") {
+            // Unscoped `git grep PATTERN` reads every tracked file's content
+            // (worktree by default, a TREE when a revision operand is
+            // present) — the same broad-search shape E5 asks for in plain
+            // grep. Scoped pathspecs (`src/`, `README.md`) stay silent.
+            const pathSpecd = args.some((a) => {
+              const d = deq(a)
+              return !d.startsWith("-") && (d.includes("/") || /^\.[\w.]/.test(d) || d.startsWith("~"))
+            })
+            fire = !pathSpecd
           }
           if (fire) {
             return {
@@ -2201,6 +2395,20 @@ export function decideToolCall(policy, toolCall, opts = {}) {
       }
     }
     case "grep": {
+      // The native grep tool searches recursively; a broad/empty root is the
+      // tool-shape equivalent of E5's `grep -r PATTERN .` and must ask the
+      // same way (the adapter enforces tool-hook asks for grep/glob since
+      // native permissions cannot see searched paths).
+      const broad = ["", ".", "./", "/", "~", "$HOME", "${HOME}"].includes(String(toolCall.path ?? "").trim())
+      if (broad) {
+        return {
+          decision: "ask",
+          ruleId: "GGR-SEARCH-002",
+          category: "search-bypass",
+          reason: "recursive search over a broad root may surface secret contents; scope to a subdirectory or approve",
+          matched: String(toolCall.path ?? "").trim() || "(default root)",
+        }
+      }
       if (!toolCall.path) return null
       {
         const hit = copyLookup(toolCall.path)
@@ -2226,12 +2434,21 @@ export function decideToolCall(policy, toolCall, opts = {}) {
       }
     }
     case "glob": {
-      // Glob patterns carry their own syntax ("**/.env*"); strip it so the
-      // surviving name can be classified like any other path token.
+      // Glob patterns carry their own syntax ("**/.env*"); normalize it so
+      // the surviving name can be classified like any other path token.
+      // Bracket classes expand to their single character ("[.]env" ->
+      // ".env" matches the protected name even though the raw pattern text
+      // does not); other brackets (ranges, negations) collapse to "?"
+      // (single-char wildcard, stripped below).
       // E10: deny-tier asks (existing) and ask-tier asks (startup-file
       // discovery is the incident class); pass stays silent so `**/*.log`
       // never prompts.
-      const stripped = toolCall.pattern.replaceAll("**/", "").replaceAll("*", "").replaceAll("{", "").replaceAll("}", "")
+      const stripped = toolCall.pattern
+        .replaceAll("**/", "")
+        .replace(/\[([^\[\]]*)\]/g, (m, inner) => (inner.length === 1 ? inner : "?"))
+        .replaceAll("*", "")
+        .replaceAll("{", "")
+        .replaceAll("}", "")
       const cls = classifyPath(policy, stripped)
       if (cls.tier === "pass") return null
       return {
