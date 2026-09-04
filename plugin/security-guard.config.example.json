@@ -29,4 +29,17 @@
   // "provenance": {
   //   "enabled": false
   // }
+
+  // Optional: allowlist path prefixes whose SCRIPT WRITES skip the
+  // content ask (GGW-CONTENT-001/002) — for trusted locations whose
+  // scripts legitimately mention protected names (a security guard's own
+  // test corpus, generators). Entries are directory prefixes (trailing
+  // slash optional) or exact file paths. Operator-only: this file is
+  // agent-write-denied (GG-SLF-001), so allowlisting can never be done by
+  // the agent itself. Default: absent (content asks enforce as blocks on
+  // betas where the permission channel cannot carry written content).
+  // "contentWriteAllowlist": [
+  //   "tests/",
+  //   ".redteam/"
+  // ]
 }

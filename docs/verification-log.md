@@ -57,9 +57,22 @@ live-silent on 0.4.6 (package.json with a dump script wrote without a
 prompt; user confirmed no prompt). The permission channel receives only
 the path, not the content, so GGW-CONTENT and ask-tier path writes were
 unenforceable → fixed in 0.4.7 (write-path asks downgrade to block). Live
-verification of 0.4.7 after restart: the carrier write must BLOCK; a
-benign carrier write must stay silent; `patch policy/policy.jsonc
-/dev/null` (shell, cd-less) should still PROMPT via the channel.
+verification of 0.4.7 after restart: the carrier write BLOCKED; a benign
+carrier write stayed silent; `patch policy/policy.jsonc /dev/null`
+(shell, cd-less) PROMPTED and a user decline aborted it. Known FP: agent
+writes of script files that merely mention .env-style names (including
+this repo's own test corpus) also block.
+
+**Content-write allowlist (0.4.8):** operator-controlled
+`contentWriteAllowlist` in `security-guard.config.json` (agent-write-
+denied by GG-SLF-001, so only the operator can set it). Live on
+beta-19086: a test file under the allowlisted `tests/` mentioning .env
+wrote silently (the same write BLOCKED twice on 0.4.7), while a carrier
+`package.json` outside the allowlist still BLOCKED. Matcher caveat found
+live: the harness delivers absolute paths, so entries match as PATH
+SEGMENTS (`tests/` covers `/repo/tests/...`) — operators should use
+distinctive directory names. Ask-tier path writes (GG-SLF-004, GG-RC-008)
+are deliberately not allowlistable; the shell form still prompts.
 
 Remaining live verification after redeploying 0.4.6 + restart: **DONE —
 2026-09-04, beta-19086, plugin 0.4.6, doctor healthy.** `cd

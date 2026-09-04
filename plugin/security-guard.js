@@ -493,7 +493,7 @@ export const GENERATED_GUARD_POLICY = Object.freeze({
 })
 // ==== END GENERATED GUARD POLICY ====
 
-export const PLUGIN_VERSION = "0.4.7"
+export const PLUGIN_VERSION = "0.4.8"
 export const PLUGIN_ID = "security-guard"
 
 // ============================================================================
@@ -2841,6 +2841,31 @@ function looksLikeCarrierScript(path) {
   return CARRIER_SCRIPT_RE_COMPILED.test(String(path ?? "")) || CARRIER_WORKFLOW_RE.test(String(path ?? ""))
 }
 
+/**
+ * Operator-controlled content-write allowlist ("contentWriteAllowlist" in
+ * security-guard.config.json: ["tests/", "tools/gen.sh"]). A write under an
+ * allowlisted directory skips the GGW-CONTENT content ask — for trusted
+ * locations whose scripts legitimately mention protected names (a security
+ * guard's own test corpus, generators). Matching is by PATH SEGMENT: an
+ * entry matches the whole path, a prefix, a suffix, or any path segment, so
+ * relative entries ("tests/") cover absolute harness paths
+ * (/repo/tests/...) and any directory with the trusted name — operators
+ * should use distinctive names. Only the USER can change the override file
+ * (GG-SLF-001 denies agent writes to it), so allowlisting is an operator
+ * decision, never an agent-reachable one.
+ */
+function contentWriteAllowlisted(policy, path) {
+  const list = policy.contentWriteAllowlist ?? []
+  if (!list.length) return false
+  const p = String(path ?? "").toLowerCase().replace(/\/+/g, "/").replace(/\/+$/, "")
+  if (!p) return false
+  return list.some((entry) => {
+    const e = String(entry ?? "").toLowerCase().replace(/\/+/g, "/").replace(/\/+$/, "")
+    if (!e) return false
+    return p === e || p.startsWith(e + "/") || p.endsWith("/" + e) || p.includes("/" + e + "/")
+  })
+}
+
 /** Decide on a normalized tool call. Returns null (no opinion) or a verdict. */
 export function decideToolCall(policy, toolCall, opts = {}) {
   const knownCopies = opts.knownCopies ?? []
@@ -2903,7 +2928,7 @@ export function decideToolCall(policy, toolCall, opts = {}) {
           (looksLikeScript(toolCall.path, toolCall.content) || looksLikeCarrierScript(toolCall.path))
         ) {
           const hits = embeddedProtectedHits(policy, toolCall.content)
-          if (hits.length) {
+          if (hits.length && !contentWriteAllowlisted(policy, toolCall.path)) {
             const first = hits[0]
             return {
               decision: "ask",
@@ -3179,6 +3204,9 @@ export function applyGuardOverride(basePolicy, override) {
       : []
   } else {
     out.promoteAskToDenyIds = basePolicy.promoteAskToDenyIds ?? []
+  }
+  if (Array.isArray(override.contentWriteAllowlist)) {
+    out.contentWriteAllowlist = override.contentWriteAllowlist.map(String)
   }
   // Per-tool effect overrides (e.g. { "outline_update_document": { "effect": "allow" } })
   // Format: { "<action_name>": { "effect": "allow"|"ask"|"deny", ... } }

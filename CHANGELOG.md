@@ -2,6 +2,23 @@
 
 All notable changes. Format: Keep a Changelog; versioning: semantically ordered pre-releases.
 
+## 0.4.8 — operator content-write allowlist
+
+0.4.7's write-path downgrade (ask → block) is correct for untrusted
+locations but made the guard's own development impractical: test corpora
+legitimately mention protected names, and every such write blocked. New
+operator-controlled escape hatch, default off:
+
+- **`contentWriteAllowlist`** in `security-guard.config.json`: path
+  prefixes (directory or exact file) whose SCRIPT WRITES skip the content
+  ask (`GGW-CONTENT-001/002`). Parsed by `applyGuardOverride`, matched
+  case-insensitively with directory semantics. Operator-only by
+  construction: the override file is agent-write-denied (`GG-SLF-001`),
+  so allowlisting can never be performed by the agent it would weaken.
+  Everything outside the allowlist still blocks; ask-tier path writes
+  (`GG-RC-008`, `GG-SLF-004`) are NOT allowlistable — use the shell form,
+  which prompts.
+
 ## 0.4.7 — live-verification fix: write-tool asks enforce as blocks
 
 Live verification of the 0.4.4 carrier fix on beta-19086 showed the
