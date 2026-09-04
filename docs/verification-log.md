@@ -95,6 +95,18 @@ was two things: (1) prompts DID surface in the TUI and the harness auto-
 continued after approval (user-confirmed), and (2) repeat command texts
 matched saved approvals. Deny-tier enforcement was and is live.
 
+**Saved-approval audit — 2026-09-04:** the project-scoped saved approval
+`read` / `*` (V2 permission store, `opencode.db` `permission` table) was
+found to auto-approve EVERY native read ask — the native `*.zshenv` ask
+rule (SG-RC-001) never surfaced while it existed. The row was deleted
+(service stopped, DB backed up, verified via sqlite3), after which the
+native read ask surfaced live and a user decline aborted the read
+(/tmp/rt/.zshenv dummy, plugin 0.4.6, beta-19086). This is the README
+approval-fatigue warning in vivo: one "always allow" on a blanket read
+pattern had silently disabled the entire native read-ask tier. Saved
+approvals should be audited with:
+`sqlite3 ~/.local/share/opencode/opencode.db "SELECT action, resource FROM permission"`.
+
 FP boundaries pinned silent (NEG-FP-059..070): `command -v node` wrapper
 extraction, `bash install.sh` script-shaped operands, `source
 venv/bin/activate`, `jq '.env'` field queries (pre-existing ambiguous FP —
