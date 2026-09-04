@@ -58,6 +58,22 @@ Three adversarial probe passes found — and the engine now closes —
   `docker exec env`), ask-tier unknown verbs/stdin-redir/`cd` traversal,
   glob-tool wildcard stripping, and the `withinDir` precision bugs (bare
   `credentials`/`health.json` false positives).
+- **2026-09-04f (red-team pass; fixed in-engine, live re-verification
+  pending)**: directory-copy provenance broke on idiomatic spellings —
+  trailing-slash source (`cp -r ~/.ssh/ /tmp/t && cat /tmp/t/config`),
+  trailing-slash destination (`cp -r ~/.ssh /tmp/s2/` then read),
+  glob source (`cp -r ~/.ssh/* /tmp/t`), `mv` variants — and `dirSegment2`
+  stores (`.config/gcloud`, `.config/secrets`) whose two-segment form never
+  matched the bare directory, so EVERY copy of those stores was
+  unprovenanced. Also fixed: list/config carriers (`curl -K` config with
+  `data = @.env`, `tar -T`/`--files-from`, `rsync --files-from`,
+  `zip -@ < list` — the carrier body is scanned like an executed
+  interpreter file, `GGR-LIST-001/002`; a `curl -K` call performed
+  read+exfiltrate in one silent command), git history **packaging**
+  (`git bundle create`, `git format-patch` now ask like `git archive` /
+  `git log -p`), and MCP copy provenance (`MCP-ARG-COPY-001` — reading a
+  tracked temp copy through a trusted filesystem-style MCP tool blocks the
+  way the native read tool always has).
 
 Full tables with rule IDs and FP boundaries: the 2026-09-04b/-c/-d entries
 in [docs/verification-log.md](verification-log.md).
@@ -75,13 +91,23 @@ Remaining shell-heuristic residuals (still `null` by design): stdin-delivered
 filenames (`BYP-WRP-008`), heredocs to non-gated verbs, pre-existing on-disk
 scripts (including `bash install.sh` and `.sh` operands — write-time gating
 only sees what the agent writes in-session; execution-time body inspection
-covers non-script interpreter operands only), `cp`-glob staging (file-management
-exempt; variable-indirect staging is now tracked), interpreter string
+covers non-script interpreter operands and sender/packer list carriers),
+cp-glob staging of FILES (`cp .e* /tmp/x` renames during the copy, and file-management
+verbs are exempt from the glob ask) and narrow member globs
+(`cp ~/.ssh/c* /tmp/t` copies only some members, so the dest is not tracked
+as a directory — full-store copies (`*`, trailing slash) are tracked),
+`git clone --mirror` / `cp -r .git` (packaging the object store is
+file-management parity; `git bundle create` and `git format-patch`, which
+export committed content, are now gated), interpreter string
 obfuscation and ANSI-C quoting, and extension-less benign-named carrier files
 other than the gated set (`source venv/bin/activate` stays silent; `BASH_ENV`
-and `bash /tmp/cmds` gate). Ask-tier material reached
-through `cd`-then-relative-read **as two separate tool calls** remains silent
-when the `cd` call is approved (the single-command form asks, `GGR-OTHER-002`).
+and `bash /tmp/cmds` gate). The WRITE of a list/config carrier
+(`list.txt` naming protected paths, a curl config with `data = @.env`) stays
+silent by design (prose FP discipline) — the gate fires when a sender/packer
+consumes it (`GGR-LIST-001/002`, unit-tested with the body reader). Ask-tier
+material reached through `cd`-then-relative-read **as two separate tool
+calls** remains silent when the `cd` call is approved (the single-command
+form asks, `GGR-OTHER-002`).
 Shell writes TO file-form secret names (`cp template .env`, key generation)
 stay silent by design while writes INTO guarded stores (`.ssh/`, `.aws/`,
 `.kube/`, startup files) now match tool tiers (`GGW-SHELL-WRITE-001/002`).

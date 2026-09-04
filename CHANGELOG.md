@@ -2,6 +2,51 @@
 
 All notable changes. Format: Keep a Changelog; versioning: semantically ordered pre-releases.
 
+## 0.5.1 — heartbeat phase contract fix (found during 0.5.0 live verification)
+
+The live matrix exposed an observability defect: every enforcement decision
+wrote the heartbeat with `phase: "running"`, indistinguishable from a stalled
+setup — so `doctor --live` failed with "setup did not complete; the guard is
+NOT enforcing" after the **first blocked command** and kept failing until the
+next restart, while the guard was demonstrably enforcing (the block that
+wrote the heartbeat is itself proof). Decision heartbeats now keep
+`phase: "active"` and add `lastDecision`; the doctor reports a recent
+`lastDecision` as positive liveness evidence ("last enforcement decision:
+…"). No rule behavior changed.
+
+## 0.5.0 — red-team 2026-09-04f fixes (four silent classes)
+
+Adversarial review found four silent classes; all now gated (dummy paths
+only, engine-verified, `npm test` 460 pass). Pending: install + live
+re-verification.
+
+- **Directory-copy provenance survived only one spelling** — the dir flag
+  was `basenameOf(src) === rule.value`, which silently failed for a
+  trailing slash (`cp -r ~/.ssh/ /tmp/t && cat /tmp/t/config` — the
+  documented `cp -r ~/.ssh /tmp/s` protection broke on an idiomatic slash),
+  a trailing glob (`~/.ssh/*`), every `dirSegment2` store
+  (`.config/gcloud`, `.config/secrets` — the bare directory never even
+  classified, so copies carried zero provenance), and a trailing-slash
+  destination defeated the member prefix on every lookup. Fixed with
+  `isDirFormSource()` and trailing-slash-normalized tracking at every store
+  boundary; clean-dir copies, metadata verbs, and `rm`-clears unchanged.
+- **List/config carriers** — `curl -K cfg` (body `data = @.env`),
+  `tar -T`/`--files-from`, `rsync --files-from`, `zip -@ < list` took the
+  protected reference from a file body the command line never names; one
+  `curl -K` call performed read+exfiltrate silently. Carrier operands are
+  now body-scanned like executed interpreter files (`GGR-LIST-001/002`);
+  the carrier WRITE stays silent by design (prose FP discipline), the
+  consume step gates.
+- **Git history packaging** — `git bundle create` and `git format-patch`
+  exported committed content while `git archive`/`git log -p` asked. Both
+  now ask (`GGG-HIST-001`); `bundle list-heads`/`verify` and scoped
+  `format-patch -- src/` stay silent.
+- **MCP copy provenance** — the session copy store never reached MCP
+  argument rules, so a tracked copy was readable through a trusted
+  filesystem-style MCP tool while the native read tool blocked. MCP
+  arguments naming a tracked copy (or a tracked dir member) now block
+  (`MCP-ARG-COPY-001`).
+
 ## 0.4.9 — red-team 2026-09-04e fixes (F1/F2/F3)
 
 Adversarial review found three silent classes; all now gated (dummy paths

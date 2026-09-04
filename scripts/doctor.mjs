@@ -136,7 +136,14 @@ section("Plugin liveness (heartbeat)")
       ok(`heartbeat phase=${h.phase} version=${h.version} opencode=${h.opencode ?? "?"} age=${ageH < 1 ? "<1" : Math.round(ageH)}h pid=${h.pid}`)
       // A non-active phase means setup() died partway: the hooks this check
       // exists to verify were never registered. That is a fail, not a warning.
+      // (Since plugin 0.5.1, enforcement activity no longer downgrades the
+      // phase — decision heartbeats keep "active" and add `lastDecision`.)
       if (h.phase !== "active") bad(`heartbeat phase is "${h.phase}" — setup did not complete; the guard is NOT enforcing`)
+      // Enforcement activity is positive liveness evidence: a recent
+      // lastDecision proves a registered hook fired against a real call.
+      if (h.lastDecision) {
+        ok(`last enforcement decision: ${h.lastDecision}${ageMin < 5 ? " (moments ago)" : ""}`)
+      }
       // Liveness of the recorded pid: a heartbeat from a dead process proves
       // nothing about the currently running service.
       if (Number.isInteger(h.pid)) {

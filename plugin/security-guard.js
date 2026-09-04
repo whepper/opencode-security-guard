@@ -493,7 +493,7 @@ export const GENERATED_GUARD_POLICY = Object.freeze({
 })
 // ==== END GENERATED GUARD POLICY ====
 
-export const PLUGIN_VERSION = "0.4.9"
+export const PLUGIN_VERSION = "0.5.1"
 export const PLUGIN_ID = "security-guard"
 
 // ============================================================================
@@ -591,8 +591,21 @@ function formMatches(form, path) {
       return String(path).toLowerCase().includes(String(form.value).toLowerCase())
     case "dir":
       return componentsOf(path).includes(form.value)
-    case "dirSegment2":
-      return String(path).includes("/" + form.value + "/") || String(path).startsWith(form.value + "/")
+    case "dirSegment2": {
+      // A two-segment value (".config/gcloud", ".config/secrets") must also
+      // match the bare directory itself ("~/.config/gcloud"), or references
+      // to the store root never classify — which is what let
+      // `cp -r ~/.config/gcloud /tmp/g` copy the whole store with zero
+      // provenance. Trailing slashes are stripped first so "/dir/" spellings
+      // still match.
+      const t = String(path).replace(/\/+$/, "")
+      return (
+        t.includes("/" + form.value + "/") ||
+        t.startsWith(form.value + "/") ||
+        t === form.value ||
+        t.endsWith("/" + form.value)
+      )
+    }
     case "withinDir": {
       const comps = componentsOf(path)
       return comps.includes(form.withinDir) && comps[comps.length - 1] === form.value
@@ -627,6 +640,40 @@ function findPolicyRule(policy, ruleId) {
  *  copied/symlinked directory (`cp -r ~/.ssh /tmp/s && cat /tmp/s/config`). */
 function isDirFormRule(rule) {
   return Boolean(rule && (rule.form === "dir" || rule.form === "dirSegment2"))
+}
+
+/**
+ * Directory-form SOURCE detection for copy provenance. The tracked copy
+ * carries `dir` only when the source IS the protected directory, so members
+ * of the copy inherit the tier. This must survive idiomatic spellings the
+ * old `basenameOf(src) === rule.value` test silently failed on:
+ *   - trailing slash  (`cp -r ~/.ssh/ /tmp/s` — contents are copied, but
+ *     basenameOf returned the whole string because the last component was
+ *     empty, so dir provenance was lost and members read silently),
+ *   - trailing glob   (`cp -r ~/.ssh/* /tmp/s` — members copied),
+ *   - dirSegment2     (`cp -r ~/.config/gcloud /tmp/g` — the rule value is a
+ *     two-segment path, never a basename, so dir provenance was lost on
+ *     EVERY copy of those stores).
+ */
+function isDirFormSource(rule, srcNorm) {
+  if (!rule || (rule.form !== "dir" && rule.form !== "dirSegment2")) return false
+  const t = String(srcNorm).replace(/\/+\*+\??$/, "").replace(/\/+$/, "")
+  if (rule.form === "dir") return basenameOf(t) === rule.value
+  return t === rule.value || t.endsWith("/" + rule.value)
+}
+
+/** Dest/source token as stored for provenance: case-preserving, trailing
+ *  slashes removed (`/tmp/s2/` must not defeat the `token + "/"` member
+ *  prefix that later reads match against). */
+function trackToken(t) {
+  return normalizePathToken(String(t ?? "")).replace(/\/+$/, "")
+}
+
+/** Canonical copy-provenance comparison token: lowercased, `./`-stripped,
+ *  trailing slashes removed. Every copy-store lookup uses this so a tracked
+ *  dest and a later read agree on the prefix. */
+function normCopyToken(t) {
+  return normalizePathToken(String(t ?? "")).toLowerCase().replace(/^\.\/+/, "").replace(/\/+$/, "")
 }
 
 /**
@@ -777,7 +824,7 @@ const SENDER_VERBS = new Set([
   "rsync", "telnet", "socat", "gh", "gsutil", "aws", "az", "gcloud", "huggingface-cli",
 ])
 const ARCHIVE_CREATORS = new Set(["tar", "zip", "jar", "7z", "7za", "ditto"])
-const GIT_CONTENT_SUBCOMMANDS = new Set(["show", "cat-file", "archive", "log", "diff", "whatchanged", "grep"])
+const GIT_CONTENT_SUBCOMMANDS = new Set(["show", "cat-file", "archive", "log", "diff", "whatchanged", "grep", "bundle", "format-patch"])
 // Re-entry wrappers: programs whose ARGUMENTS are themselves a command. Without
 // recursive analysis these defeat every verb-class rule, because the outer verb
 // (`bash`, `eval`, `env`, `sudo`, …) belongs to no class:
@@ -1154,17 +1201,13 @@ const COPY_TRACK_VERBS = new Set(["cp", "install", "mv", "ln"])
 export function createCopyProvenanceStore(opts = {}) {
   const maxEntries = opts.maxEntries ?? 32
   const map = new Map() // normLower -> {tier, ruleId, token, dir}
-  const norm = (t) => {
-    let n = normalizePathToken(String(t ?? "")).toLowerCase()
-    n = n.replace(/^\.\/+/, "")
-    return n
-  }
+  const norm = normCopyToken
   return {
     note(destToken, tier, ruleId, dir = false) {
       const key = norm(destToken)
       if (!key || tier === "pass") return null
       if (map.has(key)) map.delete(key) // refresh recency
-      map.set(key, { tier, ruleId, token: normalizePathToken(String(destToken)), dir })
+      map.set(key, { tier, ruleId, token: trackToken(destToken), dir })
       while (map.size > maxEntries) {
         const oldest = map.keys().next().value
         map.delete(oldest)
@@ -1272,7 +1315,7 @@ export function detectCopyTracks(policy, command, opts = {}) {
         }
         srcHit = best
         srcIdx = wi
-        srcNorm = found.n
+        srcNorm = trackToken(found.n)
         break
       }
     }
@@ -1296,13 +1339,13 @@ export function detectCopyTracks(policy, command, opts = {}) {
       }
       if (destCand) {
         const srcRule = findPolicyRule(policy, srcHit.ruleId)
-        const dirProp = isDirFormRule(srcRule) && basenameOf(srcNorm) === srcRule.value
+        const dirProp = isDirFormSource(srcRule, srcNorm)
         const dest = dirProp
           ? destCand
           : destCand.endsWith("/")
             ? destCand.replace(/\/+$/, "") + "/" + basenameOf(srcNorm)
             : destCand
-        out.push({ dest, tier: srcHit.tier, ruleId: srcHit.ruleId, dir: dirProp })
+        out.push({ dest: trackToken(dest), tier: srcHit.tier, ruleId: srcHit.ruleId, dir: dirProp })
         break
       }
     }
@@ -1318,7 +1361,7 @@ export function detectCopyTracks(policy, command, opts = {}) {
 export function detectCopyClears(command, trackedNorms) {
   const drop = []
   if (!trackedNorms?.length) return drop
-  const set = new Set(trackedNorms.map((t) => normalizePathToken(String(t)).toLowerCase().replace(/^\.\/+/, "")))
+  const set = new Set(trackedNorms.map((t) => normCopyToken(t)))
   const clearAssignments = {}
   for (const rawSeg of splitSegments(String(command ?? ""))) {
     const toks = tokenize(rawSeg).map((t) => (isAssignment(t) ? t : unquote(t)))
@@ -1333,10 +1376,10 @@ export function detectCopyClears(command, trackedNorms) {
     const verb = basenameOf(words[0]).toLowerCase()
     for (const w of words.slice(1)) {
       // F1 (2026-09-04e): `D=/tmp/x; rm $D` clears the tracked dest.
-      const cands = [normalizePathToken(String(w)).toLowerCase().replace(/^\.\/+/, "")]
+      const cands = [normCopyToken(w)]
       for (const v of varRefs(String(w))) {
         const val = clearAssignments[v]
-        if (val) cands.push(normalizePathToken(String(val)).toLowerCase().replace(/^\.\/+/, ""))
+        if (val) cands.push(normCopyToken(val))
       }
       for (const n of [...new Set(cands.filter(Boolean))]) {
         if (n && set.has(n) && (verb === "rm" || verb === "shred")) drop.push(n)
@@ -1488,8 +1531,8 @@ export function analyzeCommand(policy, command, opts = {}) {
           tok.startsWith(c2.token + "/") &&
           // same-command rm/shred of the dir clears its members too
           !clearedCopies.some((k) => {
-            const kt = normalizePathToken(String(k.token ?? "")).toLowerCase()
-            const nt = normalizePathToken(String(tok)).toLowerCase()
+            const kt = normCopyToken(k.token ?? "")
+            const nt = normCopyToken(tok)
             return nt === kt || (k.dir && nt.startsWith(kt + "/"))
           }))
     )
@@ -1500,17 +1543,17 @@ export function analyzeCommand(policy, command, opts = {}) {
     // dests cover members via prefix. Same-command rm/shred clears (see
     // clearedCopies) applies here too.
     if (Array.isArray(opts.knownCopies)) {
-      const norm = normalizePathToken(String(tok)).toLowerCase()
+      const norm = normCopyToken(tok)
       const cleared = clearedCopies.some((k) => {
-        const kt = normalizePathToken(String(k.token ?? "")).toLowerCase()
+        const kt = normCopyToken(k.token ?? "")
         return norm === kt || (k.dir && norm.startsWith(kt + "/"))
       })
       const hit = cleared
         ? undefined
         : opts.knownCopies.find(
           (k) =>
-            normalizePathToken(String(k.token ?? "")).toLowerCase() === norm ||
-            (k.dir && norm.startsWith(normalizePathToken(String(k.token ?? "")).toLowerCase() + "/"))
+            normCopyToken(k.token ?? "") === norm ||
+            (k.dir && norm.startsWith(normCopyToken(k.token ?? "") + "/"))
         )
       if (hit) return { tier: hit.tier, ruleId: hit.ruleId, category: "protected-path", reason: "temporary copy of protected material" }
     }
@@ -2040,18 +2083,18 @@ export function analyzeCommand(policy, command, opts = {}) {
           return
         }
         if (Array.isArray(opts.knownCopies)) {
-          const norm = normalizePathToken(String(cand)).toLowerCase()
+          const norm = normCopyToken(cand)
           const cleared = clearedCopies.some(
             (k) => {
-              const kt = normalizePathToken(String(k.token ?? "")).toLowerCase()
+              const kt = normCopyToken(k.token ?? "")
               return norm === kt || (k.dir && norm.startsWith(kt + "/"))
             }
           )
           if (!cleared) {
             const hit = opts.knownCopies.find(
               (k) =>
-                normalizePathToken(String(k.token ?? "")).toLowerCase() === norm ||
-                (k.dir && norm.startsWith(normalizePathToken(String(k.token ?? "")).toLowerCase() + "/"))
+                normCopyToken(k.token ?? "") === norm ||
+                (k.dir && norm.startsWith(normCopyToken(k.token ?? "") + "/"))
             )
             if (hit) {
               classified.push({ token: basenameOf(cand), tier: hit.tier, ruleId: hit.ruleId, category: "protected-path", reason: "temporary copy of protected material" })
@@ -2405,7 +2448,7 @@ export function analyzeCommand(policy, command, opts = {}) {
     // `rm keyfile && cat keyfile` does not over-block on a deleted file).
     if (classified.length && (verb === "rm" || verb === "shred")) {
       for (let wi = 1; wi < words.length; wi++) {
-        const norm = normalizePathToken(words[wi])
+        const norm = trackToken(words[wi])
         if (!norm || norm.startsWith("-")) continue
         for (let ci = copies.length - 1; ci >= 0; ci--) {
           const c = copies[ci]
@@ -2414,7 +2457,7 @@ export function analyzeCommand(policy, command, opts = {}) {
           }
         }
         for (const k of opts.knownCopies ?? []) {
-          const kt = normalizePathToken(String(k.token ?? ""))
+          const kt = trackToken(k.token ?? "")
           const isDir = Boolean(k.dir)
           if (kt === norm || (isDir && norm.startsWith(kt + "/"))) {
             clearedCopies.push(k)
@@ -2449,7 +2492,7 @@ export function analyzeCommand(policy, command, opts = {}) {
         if (found) {
           srcIdx = wi
           srcHit = found.cls
-          srcNorm = found.norm
+          srcNorm = trackToken(found.norm)
           break
         }
       }
@@ -2468,14 +2511,13 @@ export function analyzeCommand(policy, command, opts = {}) {
           }
           if (destCand) {
             const srcRule = findPolicyRule(policy, srcHit.ruleId)
-            const dirProp =
-              isDirFormRule(srcRule) && basenameOf(srcNorm) === srcRule.value
+            const dirProp = isDirFormSource(srcRule, srcNorm)
             const dest = dirProp
               ? destCand
               : destCand.endsWith("/")
                 ? destCand.replace(/\/+$/, "") + "/" + basenameOf(srcNorm)
                 : destCand
-            copies.push({ token: dest, tier: srcHit.tier, ruleId: srcHit.ruleId, dir: dirProp })
+            copies.push({ token: trackToken(dest), tier: srcHit.tier, ruleId: srcHit.ruleId, dir: dirProp })
             break
           }
         }
@@ -2586,6 +2628,41 @@ export function analyzeCommand(policy, command, opts = {}) {
               reason: hit.tracked
                 ? "executed file body references a temporary copy of protected material"
                 : "executed file body references protected material the command line does not name",
+              matched: hit.name,
+              pathRule: hit.pathRule,
+            }
+          }
+        }
+      }
+    }
+
+    // ---- 2026-09-04f: list/config carriers for senders and packers ---------
+    // `curl -K cfg` (whose body says `data = @.env`), `tar -T/--files-from
+    // list`, `rsync --files-from=list`, and `zip -@` fed from stdin consume
+    // the protected reference from a file the command line never names —
+    // a silent read+package/send chain (`curl -K` performs both in one
+    // call). Body-scan the carrier like an executed interpreter file; the
+    // write-time GGW-CONTENT check deliberately stays quiet for these files
+    // (prose FP discipline), so the consume step is the enforcement point.
+    if (!classified.length && typeof opts.readFile === "function") {
+      const carrier = listCarrierOperand(verb, args, toks)
+      if (carrier && !looksLikeScript(carrier) && !looksLikeCarrierScript(carrier)) {
+        let body = null
+        try {
+          body = opts.readFile(carrier)
+        } catch {
+          body = null
+        }
+        if (body) {
+          const hit = scanBodyForProtected(policy, body, [...copies, ...(opts.knownCopies ?? [])], promote)
+          if (hit) {
+            return {
+              decision: hit.tier === "deny" ? "block" : "ask",
+              ruleId: hit.tracked ? "GGR-LIST-002" : "GGR-LIST-001",
+              category: "semantic-bypass",
+              reason: hit.tracked
+                ? "list/config carrier references a temporary copy of protected material"
+                : "list/config carrier references protected material the command line does not name",
               matched: hit.name,
               pathRule: hit.pathRule,
             }
@@ -2741,6 +2818,18 @@ export function analyzeCommand(policy, command, opts = {}) {
               return !d.startsWith("-") && (d.includes("/") || /^\.[\w.]/.test(d) || d.startsWith("~"))
             })
             fire = !pathSpecd
+          } else if (sub === "bundle") {
+            // `git bundle create` packages committed objects — including any
+            // committed secrets — into a single exfiltratable artifact. It is
+            // the same packaging operation as `git archive` (which asks) but
+            // was absent from the content-subcommand set. Listing
+            // (`list-heads`) and verification (`verify`) are metadata-only
+            // and stay silent.
+            fire = args.some((a) => deq(a) === "create")
+          } else if (sub === "format-patch") {
+            // Patch export renders committed diffs — the `log -p` class in
+            // file form. Scoped pathspecs (`-- src/`) stay silent above.
+            fire = true
           }
           if (fire) {
             return {
@@ -2966,6 +3055,33 @@ export function mcpArgumentVerdicts(policy, input, promote, opts = {}) {
         hitPath = true
       }
     }
+    // 2026-09-04f: session copy provenance — the native read tool blocks a
+    // read of a tracked temp copy (GGR-COPY-001); MCP filesystem-style tools
+    // must not be a quieter path to the same object. Same normalization as
+    // every other copy-store lookup (trailing-slash stripped, dir prefix).
+    if (!hitPath && opts.knownCopies?.length) {
+      const cn = normCopyToken(value)
+      const hit = cn
+        ? opts.knownCopies.find(
+          (k) =>
+            normCopyToken(k.token ?? "") === cn ||
+            (k.dir && cn.startsWith(normCopyToken(k.token ?? "") + "/"))
+        )
+        : null
+      if (hit) {
+        out.push({
+          decision: "block",
+          ruleId: "MCP-ARG-COPY-001",
+          category: "mcp-protected-path",
+          reason:
+            (hit.tier === "deny" ? "" : "approval-gated: ") +
+            "argument references a temporary copy of protected material (session provenance)",
+          matched: basenameOf(cn),
+          pathRule: hit.ruleId,
+        })
+        hitPath = true
+      }
+    }
     // Secret-named VALUE detection — deliberately narrow to avoid flagging
     // prose that merely contains words like "secret": either a BARE variable
     // name, or an explicit KEY=VALUE assignment whose key names a secret.
@@ -3019,7 +3135,7 @@ export function decideMcpCall(policy, toolName, input, knownServers = [], opts =
   }
 
   if (opts.withArgs !== false) {
-    const argHits = mcpArgumentVerdicts(policy, input, opts.promoteAskToDenyIds ?? policy.promoteAskToDenyIds ?? [], { resolvePath: opts.resolvePath })
+    const argHits = mcpArgumentVerdicts(policy, input, opts.promoteAskToDenyIds ?? policy.promoteAskToDenyIds ?? [], { resolvePath: opts.resolvePath, knownCopies: opts.knownCopies })
     // Highest escalation wins; argument evidence always surfaces.
     if (argHits.length) {
       const worst = argHits.find((h) => h.decision === "block") ?? argHits[0]
@@ -3149,6 +3265,59 @@ function interpreterBodyOperand(verb, args) {
 }
 
 /**
+ * File operand carrying a LIST of paths or sender OPTIONS, or null
+ * (2026-09-04f). `curl -K cfg` (`data = @.env`), `tar -T/--files-from list`,
+ * `rsync --files-from=list`, and `zip -@` fed from stdin take the protected
+ * reference from a file body the command line never names — the
+ * list/config-carrier analog of an executed interpreter body. The operand is
+ * body-scanned with the same bounded reader and the same FP rule: only
+ * literal protected references (or session-tracked copies) fire.
+ * `toks` is the raw token list (stdin-redirection lookup for `zip -@` and
+ * `tar -T -`).
+ */
+function listCarrierOperand(verb, args, toks) {
+  const deq = (a) => shellDequote(String(a))
+  const stdinOperand = () => {
+    const idx = toks.findIndex((t) => unquote(t) === "<")
+    return idx !== -1 ? normalizePathToken(unquote(toks[idx + 1] ?? "")) : null
+  }
+  if (verb === "curl") {
+    for (let i = 0; i < args.length; i++) {
+      const d = deq(args[i])
+      if (d === "-K" || d === "--config") return deq(args[i + 1] ?? "")
+      if (d.startsWith("--config=")) return d.slice("--config=".length)
+    }
+    return null
+  }
+  if (verb === "tar") {
+    for (let i = 0; i < args.length; i++) {
+      const d = deq(args[i])
+      if (/^-[A-Za-z]*T$/.test(d) || d === "--files-from") {
+        const v = deq(args[i + 1] ?? "")
+        if (v && v !== "-") return v
+        // `tar -T - < list`: the member list arrives on stdin.
+        return stdinOperand()
+      }
+      if (d.startsWith("--files-from=")) return d.slice("--files-from=".length)
+    }
+    return null
+  }
+  if (verb === "rsync") {
+    for (let i = 0; i < args.length; i++) {
+      const d = deq(args[i])
+      if (d === "--files-from") return deq(args[i + 1] ?? "")
+      if (d.startsWith("--files-from=")) return d.slice("--files-from=".length)
+    }
+    return null
+  }
+  if (verb === "zip" && args.some((a) => deq(a) === "-@")) {
+    // `zip -@` reads the member list from stdin.
+    return stdinOperand()
+  }
+  return null
+}
+
+/**
  * Scan an executed file's body for protected refs (direct) and session-tracked
  * copies (forward AND reverse-order indirection). Returns null when clean.
  */
@@ -3206,13 +3375,13 @@ export function decideToolCall(policy, toolCall, opts = {}) {
   const knownCopies = opts.knownCopies ?? []
   const copyLookup = (p) => {
     if (!knownCopies.length || !p) return null
-    const norm = normalizePathToken(String(p)).toLowerCase().replace(/^\.\/+/, "")
+    const norm = normCopyToken(p)
     if (!norm) return null
     return (
       knownCopies.find(
         (k) =>
-          normalizePathToken(String(k.token ?? "")).toLowerCase().replace(/^\.\/+/, "") === norm ||
-          (k.dir && norm.startsWith(normalizePathToken(String(k.token ?? "")).toLowerCase().replace(/^\.\/+/, "") + "/"))
+          normCopyToken(k.token ?? "") === norm ||
+          (k.dir && norm.startsWith(normCopyToken(k.token ?? "") + "/"))
       ) ?? null
     )
   }
@@ -3426,11 +3595,11 @@ export function decidePermissionEvent(policy, action, resources, opts = {}) {
     if (action === "read" || action === "edit") {
       const mode = action === "edit" ? "write" : "read"
       if (mode === "read" && knownCopies.length) {
-        const norm = normalizePathToken(String(res)).toLowerCase().replace(/^\.\/+/, "")
+        const norm = normCopyToken(res)
         const hit = knownCopies.find(
           (k) =>
-            normalizePathToken(String(k.token ?? "")).toLowerCase().replace(/^\.\/+/, "") === norm ||
-            (k.dir && norm.startsWith(normalizePathToken(String(k.token ?? "")).toLowerCase().replace(/^\.\/+/, "") + "/"))
+            normCopyToken(k.token ?? "") === norm ||
+            (k.dir && norm.startsWith(normCopyToken(k.token ?? "") + "/"))
         )
         if (hit) {
           return {
@@ -3615,6 +3784,19 @@ function heartbeatPath() {
   return path.join(dataHome, "security-guard-for-opencode", "health.json")
 }
 
+/**
+ * Heartbeat phase contract (fixed 2026-09-04f, 0.5.1):
+ *   - "starting" — setup() entered, hooks not yet registered;
+ *   - "active"   — setup() completed; ALSO used by runtime decision writes
+ *                  (below), which add `lastDecision`. Enforcement activity
+ *                  must never downgrade the phase: the previous behavior
+ *                  (decision writes with phase "running") made every blocked
+ *                  command flip the heartbeat to a non-active phase, so
+ *                  `doctor --live` false-failed with "setup did not complete"
+ *                  after the first block until the next restart.
+ * `doctor.mjs` fails on any non-active phase and treats a recent
+ * `lastDecision` as positive liveness evidence.
+ */
 function writeHeartbeat(extra = {}) {
   try {
     const file = heartbeatPath()
@@ -3726,11 +3908,12 @@ export default {
       // Code-Mode wrapper flattens messages, so blocking must not depend on
       // message propagation); approval-tier verdicts are enforced by the
       // permission channel, which fires per nested call and CAN prompt.
-      const mcpVerdict = decideMcpCall(policy, event.tool, event.input ?? {}, knownServers, { resolvePath })
+      const knownCopies = copyStore.entries()
+      const mcpVerdict = decideMcpCall(policy, event.tool, event.input ?? {}, knownServers, { resolvePath, knownCopies })
       if (prov) {
         const scanHit = provenanceScan(prov, event.input ?? {})
         if (scanHit) {
-          writeHeartbeat({ phase: "running", lastDecision: scanHit.ruleId })
+          writeHeartbeat({ phase: "active", lastDecision: scanHit.ruleId })
           throw new Error(formatVerdict(scanHit))
         }
       }
@@ -3740,15 +3923,15 @@ export default {
           pendingSensitive.set(callID, true)
         }
         if (mcpVerdict.decision === "block") {
-          writeHeartbeat({ phase: "running", lastDecision: mcpVerdict.ruleId })
+          writeHeartbeat({ phase: "active", lastDecision: mcpVerdict.ruleId })
           throw new Error(formatVerdict(mcpVerdict))
         }
       }
 
       const norm = normalizeToolCall(event.tool, event.input ?? {})
-      const v = decideToolCall(policy, norm, { resolvePath, readFile: readBody, knownCopies: copyStore.entries() })
+      const v = decideToolCall(policy, norm, { resolvePath, readFile: readBody, knownCopies })
       if (v && v.decision === "block") {
-        writeHeartbeat({ phase: "running", lastDecision: v.ruleId })
+        writeHeartbeat({ phase: "active", lastDecision: v.ruleId })
         throw new Error(formatVerdict(v))
       }
       // "ask" verdicts from the TOOL hook cannot raise a permission prompt
@@ -3778,7 +3961,7 @@ export default {
             (v.ruleId === "GGH-STDIN-001" || /^\s*cd(\s|$)/.test(String(norm.command ?? "")))) ||
           (norm.kind === "path" && norm.mode === "write"))
       ) {
-        writeHeartbeat({ phase: "running", lastDecision: v.ruleId })
+        writeHeartbeat({ phase: "active", lastDecision: v.ruleId })
         throw new Error(formatVerdict({ ...v, decision: "block" }))
       }
       // Provenance sources: any approval-gated call whose result will flow
@@ -3858,7 +4041,7 @@ export default {
         if (v.decision === "block") {
           event.effect = "deny"
           event.message = formatVerdict(v)
-          writeHeartbeat({ phase: "running", lastDecision: v.ruleId })
+          writeHeartbeat({ phase: "active", lastDecision: v.ruleId })
         } else if (event.effect === "allow") {
           event.effect = "ask"
           event.message = formatVerdict(v)

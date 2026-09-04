@@ -100,6 +100,23 @@ test("execute.before hard-blocks protected-path arguments on MCP tools", async (
   )
 })
 
+test("decision heartbeats keep phase active (0.5.1: no phase downgrade)", async () => {
+  const { ctx, hooks } = makeCtx()
+  await securityGuard.setup(ctx)
+  const hbPath = path.join(dataHome, "security-guard-for-opencode", "health.json")
+  // A blocked call must not flip the heartbeat to a non-active phase: the
+  // block itself proves a registered hook fired. Before 0.5.1 the decision
+  // write used phase "running" and doctor --live false-failed after every
+  // block until the next restart.
+  assert.throws(
+    () => hooks["execute.before"][0]({ tool: "read", callID: "c10", input: { filePath: ".env" } }),
+    /GG-ENV-001/
+  )
+  const hb = JSON.parse(readFileSync(hbPath, "utf8"))
+  assert.equal(hb.phase, "active")
+  assert.equal(hb.lastDecision, "GG-ENV-001")
+})
+
 test("permission.evaluate escalates unlisted-server read-only allows to ask", async () => {
   const { ctx, hooks } = makeCtx()
   await securityGuard.setup(ctx)
