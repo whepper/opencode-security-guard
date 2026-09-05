@@ -125,16 +125,33 @@ test("E10 glob tool asks on ask-tier discovery", () => {
 
 // E2 — session copy provenance (pure helpers + knownCopies wiring).
 test("E2 copy store tracks deny sources, ignores clean copies, bounds size", () => {
-  const s = createCopyProvenanceStore({ maxEntries: 2 })
+  // 2026-09-05: retention is partitioned — deny-tier DATA entries bound at
+  // maxDenyEntries (memory valve) and are no longer evictable by advisory
+  // pressure (the old single FIFO was attacker-flushable with benign notes;
+  // see tests/unit/provenance-2026-09-05.test.js).
+  const s = createCopyProvenanceStore({ maxEntries: 2, maxDenyEntries: 2 })
   assert.equal(detectCopyTracks(P, "cp .env /tmp/x", {}).length, 1)
   assert.equal(detectCopyTracks(P, "cp notes.txt notes.md", {}).length, 0)
   assert.equal(detectCopyTracks(P, "cp .env.example .env", {}).length, 0)
   s.note("/tmp/a", "deny", "GG-ENV-001")
   s.note("/tmp/b", "deny", "GG-ENV-001")
   s.note("/tmp/c", "deny", "GG-ENV-001")
-  assert.equal(s.size(), 2) // bounded FIFO
+  assert.equal(s.size(), 2) // deny partition bound (FIFO within the partition)
   assert.equal(s.lookup("/tmp/a"), null)
   assert.ok(s.lookup("/tmp/c"))
+  // Advisory entries still bound at maxEntries…
+  const s2 = createCopyProvenanceStore({ maxEntries: 2 })
+  s2.note("/tmp/a1", "ask", "GG-RC-001")
+  s2.note("/tmp/a2", "ask", "GG-RC-001")
+  s2.note("/tmp/a3", "ask", "GG-RC-001")
+  assert.equal(s2.lookup("/tmp/a1"), null)
+  assert.ok(s2.lookup("/tmp/a3"))
+  // …and never evict deny data.
+  const s3 = createCopyProvenanceStore({ maxEntries: 1 })
+  s3.note("/tmp/keep", "deny", "GG-ENV-001")
+  s3.note("/tmp/adv1", "ask", "GG-RC-001")
+  s3.note("/tmp/adv2", "ask", "GG-RC-001")
+  assert.ok(s3.lookup("/tmp/keep"))
 })
 
 test("E2 knownCopies escalates shell, read, and grep consumers", () => {

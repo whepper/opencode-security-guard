@@ -2,6 +2,49 @@
 
 All notable changes. Format: Keep a Changelog; versioning: semantically ordered pre-releases.
 
+## 0.6.0 — provenance architecture (taint-on-write / identity-transfer / resolve-on-consume)
+
+Second adversarial review showed the remaining bypasses live where intent
+sits inside consumed objects rather than tool-call syntax. The guard now
+keeps session object-provenance alongside per-command analysis (no policy
+change; generated block byte-identical):
+
+- **Taint on write** (`detectWriteRefTaint`, adapter `execute.after`): silent
+  agent writes whose content references protected material become `kind:"ref"`
+  provenance. Prompted writes are human-approved and never tainted.
+- **Resolve on consume** (`GGR-REF-001`): consuming a ref-tainted object as
+  program input asks; reads/listing/moves stay silent. Data-provenance
+  lookups run on symlink-resolved paths in shell, read/grep tools, the
+  permission channel, and MCP arguments.
+- **Identity transfer**: `detectCopyTracks` propagates through chained
+  `cp`/`mv`/`ln` (copy-of-copy, renames, link targets); `detectCopyClears`
+  drops `mv` sources; same-command `mv` drops the stale source name.
+- **Partitioned retention**: deny-tier data bound 4096, advisory FIFO 64 —
+  benign floods no longer evict deny provenance.
+- **Resolution canonicalization** (found by the live matrix, fixed in 0.6.0):
+  platform prefix aliases (`/tmp` resolving under a different spelling)
+  let resolved queries miss literally-noted entries; `canonStoreToken` /
+  `provToken` canonicalize the parent directory at every note/lookup/clear
+  site while preserving the final component (removing a link clears the
+  link, never its target).
+- **Narrow semantic rules** (implicit sources, still rule-based):
+  `ENV=<path>`+interactive shell (`GGD-DEF-003`), `ZDOTDIR`+zsh
+  (`GGD-DEF-004`), `kubectl config view --raw/--flatten`, `aws configure get
+  <secret-name>`, `gh auth status -t/--show-token`, `security -i`, `az account
+  get-access-token`, `gpg --export-secret[-sub]keys` (`GGE-CLI-012..017`).
+- **Hook locations are executable by path**: `.git/hooks/*` joins the carrier
+  set, so a hook body referencing protected material asks at write time
+  regardless of shebang (`git commit` itself carries no hook reference;
+  custom `core.hooksPath` dirs stay a documented residual).
+
+Live verification on beta-19151: deny-tier legs (copy/rename/symlink/long
+chains, flood survival, sender consumption, hook write, config tamper) all
+enforce; ask-tier legs are engine/adapter-verified but the
+`permission.evaluate` prompt channel appears inert on this beta (no
+permission evaluation is logged anymore — see docs/verification-log.md),
+so shell asks degrade to silent allow there. This affects the entire
+pre-existing ask surface equally, not just the new rules.
+
 ## 0.5.1 — heartbeat phase contract fix (found during 0.5.0 live verification)
 
 The live matrix exposed an observability defect: every enforcement decision

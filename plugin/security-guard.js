@@ -493,7 +493,7 @@ export const GENERATED_GUARD_POLICY = Object.freeze({
 })
 // ==== END GENERATED GUARD POLICY ====
 
-export const PLUGIN_VERSION = "0.5.1"
+export const PLUGIN_VERSION = "0.6.0"
 export const PLUGIN_ID = "security-guard"
 
 // ============================================================================
@@ -667,6 +667,43 @@ function isDirFormSource(rule, srcNorm) {
  *  prefix that later reads match against). */
 function trackToken(t) {
   return normalizePathToken(String(t ?? "")).replace(/\/+$/, "")
+}
+
+/**
+ * Filesystem-canonical form for provenance tokens (2026-09-06 fix).
+ * Platforms alias system prefixes (portable temp dirs may resolve under a
+ * different spelling): a store keyed on literals and a lookup keyed on
+ * resolved results can never meet. Canonicalize the PARENT directory
+ * (which exists post-execution) and preserve the final component
+ * lexically — resolving the final component would confuse symlinks with
+ * their targets (removing a link must clear the link, not its target).
+ * Relative tokens are left alone: resolving them against the service
+ * process working directory would corrupt them. Never throws.
+ */
+export function canonStoreToken(t, resolvePath) {
+  const s = String(t ?? "")
+  if (typeof resolvePath !== "function") return s
+  if (!s.startsWith("/") && !s.startsWith("~")) return s
+  const trimmed = s.replace(/\/+$/, "")
+  const i = trimmed.lastIndexOf("/")
+  if (i <= 0) return s
+  const dir = trimmed.slice(0, i) || "/"
+  const base = trimmed.slice(i + 1)
+  if (!base) return s
+  try {
+    const rd = resolvePath(dir)
+    if (rd && typeof rd === "string") return rd.replace(/\/+$/, "") + "/" + base
+  } catch {}
+  return s
+}
+
+/**
+ * Provenance comparison token: canonicalized, then normalized. Safe at
+ * every provenance site: no-op without a resolver, no-op for relative
+ * tokens, literal fallback on resolution failure.
+ */
+export function provToken(t, resolvePath) {
+  return normCopyToken(canonStoreToken(t, resolvePath))
 }
 
 /** Canonical copy-provenance comparison token: lowercased, `./`-stripped,
@@ -1197,25 +1234,56 @@ function isSecretEnvName(policy, name) {
 
 const COPY_TRACK_VERBS = new Set(["cp", "install", "mv", "ln"])
 
-/** Bounded FIFO store: normalized dest -> {tier, ruleId, token, dir}. */
+/**
+ * Session provenance store (2026-09-05 architecture evolution).
+ *
+ * Two entry kinds:
+ *   - kind "copy" (default): DATA provenance — the object's bytes originate
+ *     from protected material (`cp .env /tmp/x`). Readers/senders gate on it
+ *     (GGR-READ-001 / GGN-SEND-001 / GGR-COPY-001). Entries missing `kind`
+ *     (older callers/tests) are treated as "copy".
+ *   - kind "ref": REFERENCE provenance — an agent-written file whose CONTENT
+ *     references protected material (renamed makefile, ssh config with a
+ *     ProxyCommand, response/list files, service plists). The object itself
+ *     is not secret (it may be prose), so reads stay silent; only CONSUMING
+ *     it as program input asks (GGR-REF-001).
+ *
+ * Retention is partitioned (second adversarial review: the old single FIFO
+ * was attacker-flushable with benign notes):
+ *   - deny-tier "copy" entries have their own high bound (a memory valve,
+ *     not an advisory) and are never evicted by advisory pressure;
+ *   - ask-tier copies and ref entries keep a small FIFO.
+ */
 export function createCopyProvenanceStore(opts = {}) {
-  const maxEntries = opts.maxEntries ?? 32
-  const map = new Map() // normLower -> {tier, ruleId, token, dir}
+  const maxAdvisory = opts.maxEntries ?? 64
+  const maxDeny = opts.maxDenyEntries ?? 4096
+  const resolver = typeof opts.resolvePath === "function" ? opts.resolvePath : null
+  const map = new Map() // normLower -> {tier, ruleId, token, dir, kind}
   const norm = normCopyToken
+  const isDenyData = (e) => e.kind !== "ref" && e.tier === "deny"
+  const evictOldest = (predicate) => {
+    for (const k of map.keys()) {
+      if (predicate(map.get(k))) {
+        map.delete(k)
+        return
+      }
+    }
+  }
   return {
-    note(destToken, tier, ruleId, dir = false) {
-      const key = norm(destToken)
+    note(destToken, tier, ruleId, dir = false, kind = "copy") {
+      const canon = canonStoreToken(destToken, resolver)
+      const key = norm(canon)
       if (!key || tier === "pass") return null
       if (map.has(key)) map.delete(key) // refresh recency
-      map.set(key, { tier, ruleId, token: trackToken(destToken), dir })
-      while (map.size > maxEntries) {
-        const oldest = map.keys().next().value
-        map.delete(oldest)
-      }
+      map.set(key, { tier, ruleId, token: trackToken(canon), dir, kind })
+      let denyCount = 0
+      for (const e of map.values()) if (isDenyData(e)) denyCount++
+      if (denyCount > maxDeny) evictOldest(isDenyData)
+      if (map.size - denyCount > maxAdvisory) evictOldest((e) => !isDenyData(e))
       return key
     },
     lookup(token) {
-      const n = norm(token)
+      const n = norm(canonStoreToken(token, resolver))
       let hit = map.get(n)
       if (!hit) {
         // Directory-tracked dests cover their members: a read of a member of
@@ -1231,7 +1299,7 @@ export function createCopyProvenanceStore(opts = {}) {
       return hit ? { ...hit } : null
     },
     remove(token) {
-      return map.delete(norm(token))
+      return map.delete(norm(canonStoreToken(token, resolver)))
     },
     entries() {
       return [...map.values()].map((v) => ({ ...v }))
@@ -1274,6 +1342,21 @@ export function detectCopyTracks(policy, command, opts = {}) {
     }
     return [...new Set(out2.filter(Boolean))]
   }
+  // 2026-09-05 identity transfer: a source that is a SESSION-TRACKED object
+  // (copy of a copy, mv rename, ln target) carries provenance even though its
+  // own name classifies clean. This closes representation-change laundering.
+  const storeHitFor = (n) => {
+    if (!Array.isArray(opts.knownCopies)) return null
+    const norm = provToken(n, opts.resolvePath)
+    if (!norm) return null
+    return (
+      opts.knownCopies.find(
+        (k) =>
+          provToken(k.token ?? "", opts.resolvePath) === norm ||
+          (k.dir && norm.startsWith(provToken(k.token ?? "", opts.resolvePath) + "/"))
+      ) ?? null
+    )
+  }
   for (const rawSeg of splitSegments(String(command ?? ""))) {
     const toks = tokenize(rawSeg).map((t) => (isAssignment(t) ? t : unquote(t)))
     if (!toks.length) continue
@@ -1286,17 +1369,26 @@ export function detectCopyTracks(policy, command, opts = {}) {
     if (!words.length) continue
     const verb = basenameOf(words[0]).toLowerCase()
     if (!COPY_TRACK_VERBS.has(verb)) continue
-    // Find first deny/ask source (same shape gates as analyzeCommand).
+    // Find first deny/ask source (same shape gates as analyzeCommand):
+    // name-classified, session-tracked, or resolved onto either.
     let srcHit = null
     let srcIdx = -1
     let srcNorm = ""
+    let srcStoreHit = null
     for (let wi = 1; wi < words.length; wi++) {
       let found = null
+      let viaStore = null
       for (const n of variantsForToken(words[wi])) {
         if (!n || !looksLikePath(n)) continue
         const cls = classifyPath(policy, n, { promoteAskToDenyIds: promote })
         if (cls.tier !== "pass") {
           found = { cls, n }
+          break
+        }
+        const storeHit = storeHitFor(n)
+        if (storeHit) {
+          found = { cls: { tier: storeHit.tier, ruleId: storeHit.ruleId }, n }
+          viaStore = storeHit
           break
         }
       }
@@ -1316,6 +1408,7 @@ export function detectCopyTracks(policy, command, opts = {}) {
         srcHit = best
         srcIdx = wi
         srcNorm = trackToken(found.n)
+        srcStoreHit = viaStore
         break
       }
     }
@@ -1339,13 +1432,18 @@ export function detectCopyTracks(policy, command, opts = {}) {
       }
       if (destCand) {
         const srcRule = findPolicyRule(policy, srcHit.ruleId)
-        const dirProp = isDirFormSource(srcRule, srcNorm)
+        // A store-hit source carries its own dir/kind semantics (dir copies
+        // cover members; ref taint transfers through mv/cp/ln).
+        const dirProp = srcStoreHit
+          ? Boolean(srcStoreHit.dir)
+          : isDirFormSource(srcRule, srcNorm)
+        const kind = srcStoreHit ? (srcStoreHit.kind ?? "copy") : "copy"
         const dest = dirProp
           ? destCand
           : destCand.endsWith("/")
             ? destCand.replace(/\/+$/, "") + "/" + basenameOf(srcNorm)
             : destCand
-        out.push({ dest: trackToken(dest), tier: srcHit.tier, ruleId: srcHit.ruleId, dir: dirProp })
+        out.push({ dest: trackToken(dest), tier: srcHit.tier, ruleId: srcHit.ruleId, dir: dirProp, kind })
         break
       }
     }
@@ -1358,10 +1456,10 @@ export function detectCopyTracks(policy, command, opts = {}) {
  * tracked dest, or overwrite of a tracked dest from a clean source
  * (`cp notes.txt /tmp/x`). Returns normalized dest tokens to drop.
  */
-export function detectCopyClears(command, trackedNorms) {
+export function detectCopyClears(command, trackedNorms, opts = {}) {
   const drop = []
   if (!trackedNorms?.length) return drop
-  const set = new Set(trackedNorms.map((t) => normCopyToken(t)))
+  const set = new Set(trackedNorms.map((t) => provToken(t, opts.resolvePath)))
   const clearAssignments = {}
   for (const rawSeg of splitSegments(String(command ?? ""))) {
     const toks = tokenize(rawSeg).map((t) => (isAssignment(t) ? t : unquote(t)))
@@ -1376,13 +1474,30 @@ export function detectCopyClears(command, trackedNorms) {
     const verb = basenameOf(words[0]).toLowerCase()
     for (const w of words.slice(1)) {
       // F1 (2026-09-04e): `D=/tmp/x; rm $D` clears the tracked dest.
-      const cands = [normCopyToken(w)]
+      const cands = [provToken(w, opts.resolvePath)]
       for (const v of varRefs(String(w))) {
         const val = clearAssignments[v]
-        if (val) cands.push(normCopyToken(val))
+        if (val) cands.push(provToken(val, opts.resolvePath))
       }
       for (const n of [...new Set(cands.filter(Boolean))]) {
         if (n && set.has(n) && (verb === "rm" || verb === "shred")) drop.push(n)
+      }
+    }
+    // 2026-09-05: mv UNLINKS its sources — a tracked entry must not linger at
+    // the old path (the dest receives a fresh entry from detectCopyTracks).
+    if (verb === "mv") {
+      const nonFlag = words.slice(1).map((w) => String(w)).filter((w) => !w.startsWith("-"))
+      if (nonFlag.length > 1) {
+        for (const w of nonFlag.slice(0, -1)) {
+          const cands = [provToken(w, opts.resolvePath)]
+          for (const v of varRefs(String(w))) {
+            const val = clearAssignments[v]
+            if (val) cands.push(provToken(val, opts.resolvePath))
+          }
+          for (const n of [...new Set(cands.filter(Boolean))]) {
+            if (n && set.has(n)) drop.push(n)
+          }
+        }
       }
     }
   }
@@ -1504,6 +1619,66 @@ export function analyzeCommand(policy, command, opts = {}) {
   // (mirrors the adapter's post-execution clearing) so `rm keyfile && cat
   // keyfile` does not over-block on a file the rm deleted.
   const clearedCopies = [] // {token, dir} removed within this command
+  // 2026-09-05 reference-provenance collection: tokens that name a kind:"ref"
+  // object (agent-written file whose CONTENT references protected material).
+  // Collected separately from `classified` so reads/metadata stay silent.
+  const refHits = [] // {token, ruleId}
+  const notRef = (k) => k.kind !== "ref"
+  // DATA provenance lookup (kind "copy") on a normalized token: exact or
+  // directory-member prefix. Shared by classifyToken/considerToken.
+  const dataProvenanceHit = (raw) => {
+    const norm = provToken(raw, opts.resolvePath)
+    if (!norm) return null
+    const cleared = clearedCopies.some((k) => {
+      const kt = provToken(k.token ?? "", opts.resolvePath)
+      return norm === kt || (k.dir && norm.startsWith(kt + "/"))
+    })
+    if (cleared) return null
+    return (
+      copies.find(
+        (k2) =>
+          notRef(k2) &&
+          (provToken(k2.token ?? "", opts.resolvePath) === norm ||
+            (k2.dir && norm.startsWith(provToken(k2.token ?? "", opts.resolvePath) + "/")))
+      ) ??
+      (Array.isArray(opts.knownCopies)
+        ? opts.knownCopies.find(
+          (k) =>
+            notRef(k) &&
+            (provToken(k.token ?? "", opts.resolvePath) === norm ||
+              (k.dir && norm.startsWith(provToken(k.token ?? "", opts.resolvePath) + "/")))
+        ) ?? null
+        : null)
+    )
+  }
+  // REFERENCE provenance lookup on a raw token: tries the token and, for
+  // `--flag=value` spellings, the post-"=" slice.
+  const refLookup = (tok) => {
+    if (!tok) return null
+    const cands = [provToken(tok, opts.resolvePath)]
+    const eq = String(tok).indexOf("=")
+    if (eq !== -1) cands.push(provToken(String(tok).slice(eq + 1), opts.resolvePath))
+    for (const c of cands) {
+      if (!c) continue
+      const hit =
+        copies.find(
+          (k2) =>
+            k2.kind === "ref" &&
+            (provToken(k2.token ?? "", opts.resolvePath) === c ||
+              (k2.dir && c.startsWith(provToken(k2.token ?? "", opts.resolvePath) + "/")))
+        ) ??
+        (Array.isArray(opts.knownCopies)
+          ? opts.knownCopies.find(
+            (k) =>
+              k.kind === "ref" &&
+              (provToken(k.token ?? "", opts.resolvePath) === c ||
+                (k.dir && c.startsWith(provToken(k.token ?? "", opts.resolvePath) + "/")))
+          ) ?? null
+          : null)
+      if (hit) return hit
+    }
+    return null
+  }
 
   // Classify a token, falling back to inherited tiers from tracked copies.
   // `mode` ("write" for segments that create/replace files) enables the
@@ -1513,48 +1688,45 @@ export function analyzeCommand(policy, command, opts = {}) {
     if (cls.tier !== "pass") return cls
     // Symlink/alias defense: a benign-named path may resolve onto protected
     // material. Reclassify the resolved target when a resolver is provided.
+    // 2026-09-05: the RESOLVED path also feeds DATA-provenance lookup, so a
+    // symlink onto a tracked copy cannot launder its identity.
     if (typeof opts.resolvePath === "function") {
       try {
         const real = opts.resolvePath(tok)
         if (real && real !== tok) {
           const rcls = classifyPath(policy, real, { promoteAskToDenyIds: promote, mode })
           if (rcls.tier !== "pass") return { ...rcls, viaResolution: true }
+          const dhit = dataProvenanceHit(real)
+          if (dhit) {
+            return { tier: dhit.tier, ruleId: dhit.ruleId, category: "protected-path", reason: "temporary copy of protected material" }
+          }
         }
       } catch {}
     }
     const base = basenameOf(tok)
     const c = copies.find(
       (c2) =>
-        c2.token === tok ||
-        basenameOf(c2.token) === base ||
-        (c2.dir &&
-          tok.startsWith(c2.token + "/") &&
-          // same-command rm/shred of the dir clears its members too
-          !clearedCopies.some((k) => {
-            const kt = normCopyToken(k.token ?? "")
-            const nt = normCopyToken(tok)
-            return nt === kt || (k.dir && nt.startsWith(kt + "/"))
-          }))
+        notRef(c2) &&
+        (c2.token === tok ||
+          basenameOf(c2.token) === base ||
+          (c2.dir &&
+            tok.startsWith(c2.token + "/") &&
+            // same-command rm/shred of the dir clears its members too
+            !clearedCopies.some((k) => {
+              const kt = provToken(k.token ?? "", opts.resolvePath)
+              const nt = provToken(tok, opts.resolvePath)
+              return nt === kt || (k.dir && nt.startsWith(kt + "/"))
+            })))
     )
     if (c) return { tier: c.tier, ruleId: c.ruleId, category: "protected-path", reason: "temporary copy of protected material" }
     // E2 cross-call fallback: exact normalized match against session-tracked
     // dests (stricter than the basename fallback above to avoid flagging
     // unrelated same-named files in other directories). Directory-tracked
     // dests cover members via prefix. Same-command rm/shred clears (see
-    // clearedCopies) applies here too.
+    // clearedCopies) applies here too. kind:"ref" entries never feed this
+    // path — they gate consumption only (GGR-REF-001).
     if (Array.isArray(opts.knownCopies)) {
-      const norm = normCopyToken(tok)
-      const cleared = clearedCopies.some((k) => {
-        const kt = normCopyToken(k.token ?? "")
-        return norm === kt || (k.dir && norm.startsWith(kt + "/"))
-      })
-      const hit = cleared
-        ? undefined
-        : opts.knownCopies.find(
-          (k) =>
-            normCopyToken(k.token ?? "") === norm ||
-            (k.dir && norm.startsWith(normCopyToken(k.token ?? "") + "/"))
-        )
+      const hit = dataProvenanceHit(tok)
       if (hit) return { tier: hit.tier, ruleId: hit.ruleId, category: "protected-path", reason: "temporary copy of protected material" }
     }
     return cls
@@ -1590,16 +1762,43 @@ export function analyzeCommand(policy, command, opts = {}) {
     const verb = basenameOf(words[0]).toLowerCase()
     const args = words.slice(1)
 
-    // ---- BASH_ENV: a non-interactive shell executes the named rc file -------
+    // ---- shell rc-file selectors: BASH_ENV / ENV / ZDOTDIR -----------------
     // `BASH_ENV=/tmp/rc bash -c true` runs the file's body invisibly — the
     // deferred-execution class (crontab/at analog). `ENV=` is too common as a
-    // plain CI assignment to gate; BASH_ENV has no legitimate agent workflow.
+    // plain CI assignment to gate in general; BASH_ENV has no legitimate
+    // agent workflow. 2026-09-05: two narrow analogs are gated too —
+    //   - POSIX `ENV=<path>` + an INTERACTIVE shell sources the file at
+    //     startup (`ENV=/tmp/rc sh -i`), with an arbitrary filename;
+    //   - `ZDOTDIR=<path>` + zsh relocates the rc file zsh sources
+    //     UNCONDITIONALLY (even `zsh -c true`).
     for (const t of toks) {
-      if (isAssignment(t) && assignmentName(t) === "BASH_ENV") {
+      if (!isAssignment(t)) continue
+      const assignName = assignmentName(t)
+      const assignValue = assignmentValue(t)
+      if (assignName === "BASH_ENV") {
         return {
           decision: "ask", ruleId: "GGD-DEF-002", category: "deferred-execution",
           reason: "BASH_ENV names a rc file a shell will execute; its body cannot be inspected; approve only if it is free of secret material",
           matched: "BASH_ENV",
+        }
+      }
+      if (
+        assignName === "ENV" &&
+        looksLikePath(assignValue) &&
+        SHELL_REEXEC_VERBS.has(verb) &&
+        args.some((a) => /^-[A-Za-z]*i$/.test(shellDequote(String(a))))
+      ) {
+        return {
+          decision: "ask", ruleId: "GGD-DEF-003", category: "deferred-execution",
+          reason: "ENV names a startup file the interactive shell will source; its body cannot be inspected; approve only if it is free of secret material",
+          matched: "ENV",
+        }
+      }
+      if (assignName === "ZDOTDIR" && looksLikePath(assignValue) && verb === "zsh") {
+        return {
+          decision: "ask", ruleId: "GGD-DEF-004", category: "deferred-execution",
+          reason: "ZDOTDIR relocates the rc file zsh sources unconditionally; its body cannot be inspected; approve only if it is free of secret material",
+          matched: "ZDOTDIR",
         }
       }
     }
@@ -1937,6 +2136,68 @@ export function analyzeCommand(policy, command, opts = {}) {
           matched: "docker exec env",
         }
       }
+      // 2026-09-05: implicit-source credential printers (second adversarial
+      // review). These print stored credentials from DEFAULT locations
+      // (~/.kube, ~/.gnupg, keychain, CLI config), so no path token ever
+      // appears on the command line — the guard's syntactic rules cannot see
+      // them. Ask, matching the sibling rules above.
+      if (
+        verb === "kubectl" &&
+        flat[0] === "config" &&
+        flat[1] === "view" &&
+        flat.some((a) => a === "--raw" || a === "--flatten" || a.startsWith("--raw=") || a.startsWith("--flatten="))
+      ) {
+        return {
+          decision: "ask", ruleId: "GGE-CLI-012", category: "credential-cli",
+          reason: "kubectl config view --raw/--flatten prints cluster credentials (client keys, tokens) from the default kubeconfig into the transcript",
+          matched: "config view --raw",
+        }
+      }
+      if (
+        verb === "aws" &&
+        flat[0] === "configure" &&
+        flat[1] === "get" &&
+        flat.slice(2).some((a) => !String(a).startsWith("-") && isSecretEnvName(policy, String(a)))
+      ) {
+        return {
+          decision: "ask", ruleId: "GGE-CLI-013", category: "credential-cli",
+          reason: "aws configure get of a secret-named key prints the stored credential to stdout",
+          matched: flat.slice(2).find((a) => isSecretEnvName(policy, String(a))),
+        }
+      }
+      if (
+        verb === "gh" &&
+        flat.includes("auth") &&
+        flat.includes("status") &&
+        flat.some((a) => a === "-t" || a === "--show-token")
+      ) {
+        return {
+          decision: "ask", ruleId: "GGE-CLI-014", category: "credential-cli",
+          reason: "gh auth status -t/--show-token prints the stored OAuth token to stdout",
+          matched: "auth status",
+        }
+      }
+      if (verb === "security" && flat.some((a) => a === "-i" || a === "--interactive")) {
+        return {
+          decision: "ask", ruleId: "GGE-CLI-015", category: "credential-cli",
+          reason: "security -i executes keychain commands from a stdin stream the guard cannot inspect",
+          matched: "-i",
+        }
+      }
+      if (verb === "az" && flat[0] === "account" && flat.includes("get-access-token")) {
+        return {
+          decision: "ask", ruleId: "GGE-CLI-016", category: "credential-cli",
+          reason: "az account get-access-token prints a live bearer token to stdout",
+          matched: "get-access-token",
+        }
+      }
+      if (verb === "gpg" && flat.some((a) => String(a).startsWith("--export-secret"))) {
+        return {
+          decision: "ask", ruleId: "GGE-CLI-017", category: "credential-cli",
+          reason: "gpg --export-secret-keys prints armored private key material from the default keyring to stdout",
+          matched: "--export-secret-keys",
+        }
+      }
     }
 
     // ---- deferred-install tools: crontab / at / batch -----------------------
@@ -2071,35 +2332,29 @@ export function analyzeCommand(policy, command, opts = {}) {
       }
       cand = cand.replace(/^\$\{\s*[#!]?\s*[A-Za-z_][A-Za-z0-9_]*[^}]*\}?/, "")
       if (!cand || /\$\{\s*[#!]?\s*[A-Za-z_]/.test(cand)) return
+      // 2026-09-05: reference-provenance collection runs BEFORE the shape
+      // gates so `--flag=/path` and `@file` spellings are seen too. Hits are
+      // collected, never classified — reads stay silent by design.
+      {
+        const rh = refLookup(cand)
+        if (rh) refHits.push({ token: basenameOf(cand), ruleId: rh.ruleId })
+      }
       // E2 tracked-copy fallback must run BEFORE the shape gate: a copy
       // destination the agent chose (`cp .env keyfile && cat keyfile`) is
       // not path-shaped, and only TRACKED names match here — FP-free.
       {
         const c = copies.find(
-          (c2) => c2.token === cand || (c2.dir && cand.startsWith(c2.token + "/"))
+          (c2) => notRef(c2) && (c2.token === cand || (c2.dir && cand.startsWith(c2.token + "/")))
         )
         if (c) {
           classified.push({ token: basenameOf(cand), tier: c.tier, ruleId: c.ruleId, category: "protected-path", reason: "temporary copy of protected material" })
           return
         }
         if (Array.isArray(opts.knownCopies)) {
-          const norm = normCopyToken(cand)
-          const cleared = clearedCopies.some(
-            (k) => {
-              const kt = normCopyToken(k.token ?? "")
-              return norm === kt || (k.dir && norm.startsWith(kt + "/"))
-            }
-          )
-          if (!cleared) {
-            const hit = opts.knownCopies.find(
-              (k) =>
-                normCopyToken(k.token ?? "") === norm ||
-                (k.dir && norm.startsWith(normCopyToken(k.token ?? "") + "/"))
-            )
-            if (hit) {
-              classified.push({ token: basenameOf(cand), tier: hit.tier, ruleId: hit.ruleId, category: "protected-path", reason: "temporary copy of protected material" })
-              return
-            }
+          const hit = dataProvenanceHit(cand)
+          if (hit) {
+            classified.push({ token: basenameOf(cand), tier: hit.tier, ruleId: hit.ruleId, category: "protected-path", reason: "temporary copy of protected material" })
+            return
           }
         }
       }
@@ -2112,6 +2367,10 @@ export function analyzeCommand(policy, command, opts = {}) {
           const real = opts.resolvePath(cand)
           if (real && real !== cand) resolvedVariant = real
         } catch {}
+      }
+      if (resolvedVariant) {
+        const rh2 = refLookup(resolvedVariant)
+        if (rh2) refHits.push({ token: basenameOf(cand), ruleId: rh2.ruleId })
       }
       if (!looksLikePath(cand) && !EMBEDDED_PATH_CANDIDATE(cand)) {
         if (!resolvedVariant) return
@@ -2512,12 +2771,45 @@ export function analyzeCommand(policy, command, opts = {}) {
           if (destCand) {
             const srcRule = findPolicyRule(policy, srcHit.ruleId)
             const dirProp = isDirFormSource(srcRule, srcNorm)
+            // 2026-09-05: propagate the entry kind (copy vs ref) from the
+            // same-command or session store so reference taint survives
+            // same-command copies; unknown kinds default to data ("copy").
+            const srcNormN = provToken(srcNorm, opts.resolvePath)
+            const canonEntry = (e) => provToken(e.token ?? "", opts.resolvePath)
+            const srcEntry =
+              copies.find(
+                (k2) =>
+                  canonEntry(k2) === srcNormN ||
+                  (k2.dir && srcNormN.startsWith(canonEntry(k2) + "/"))
+              ) ??
+              (Array.isArray(opts.knownCopies)
+                ? opts.knownCopies.find(
+                  (k) =>
+                    canonEntry(k) === srcNormN ||
+                    (k.dir && srcNormN.startsWith(canonEntry(k) + "/"))
+                ) ?? null
+                : null)
             const dest = dirProp
               ? destCand
               : destCand.endsWith("/")
                 ? destCand.replace(/\/+$/, "") + "/" + basenameOf(srcNorm)
                 : destCand
-            copies.push({ token: trackToken(dest), tier: srcHit.tier, ruleId: srcHit.ruleId, dir: dirProp })
+            copies.push({ token: trackToken(dest), tier: srcHit.tier, ruleId: srcHit.ruleId, dir: dirProp, kind: srcEntry?.kind ?? "copy" })
+            // 2026-09-05: `mv` unlinks its sources — drop the source's
+            // same-command entries so a later `cat <old-name>` in the same
+            // command does not over-block on a file that no longer exists
+            // (mirrors the rm/shred splice above; the adapter clears the
+            // session store post-execution via detectCopyClears).
+            if (verb === "mv") {
+              const snorm = provToken(srcNorm, opts.resolvePath)
+              for (let ci = copies.length - 1; ci >= 0; ci--) {
+                const c = copies[ci]
+                const ct = provToken(c.token ?? "", opts.resolvePath)
+                if (ct === snorm || basenameOf(ct) === basenameOf(snorm)) {
+                  copies.splice(ci, 1)
+                }
+              }
+            }
             break
           }
         }
@@ -2598,6 +2890,33 @@ export function analyzeCommand(policy, command, opts = {}) {
         if (plainAsk && !METADATA_VERBS.has(verb) && !PRINTERS.has(verb)) {
           return verdict(plainAsk, "GGR-OTHER-002", "unrecognized operation references approval-gated material", plainAsk.token)
         }
+      }
+    }
+
+    // ---- 2026-09-05: reference-provenance consumption (ask) -----------------
+    // An agent-written object whose CONTENT references protected material is
+    // being handed to a PROGRAM here (runner `-f`/`--config`, `@response`
+    // files, xargs -a lists, config-selected execution). The object itself
+    // may be prose, so reading/listing/moving it stayed silent above; only
+    // consuming it as program input asks. Metadata/reader/printer/file-
+    // management verbs never interpret file content, so they are exempt
+    // (FP discipline: `cat notes.md` where notes.md merely mentions .env
+    // must never prompt).
+    if (
+      refHits.length &&
+      !FILE_MANAGEMENT_VERBS.has(verb) &&
+      !READER_VERBS.has(verb) &&
+      !PRINTERS.has(verb) &&
+      !METADATA_VERBS.has(verb)
+    ) {
+      return {
+        decision: "ask",
+        ruleId: "GGR-REF-001",
+        category: "provenance-consume",
+        reason:
+          "this file was written by the agent and references protected material; approve only if consuming it as program input is intended",
+        matched: refHits[0].token,
+        pathRule: refHits[0].ruleId,
       }
     }
 
@@ -3059,15 +3378,26 @@ export function mcpArgumentVerdicts(policy, input, promote, opts = {}) {
     // read of a tracked temp copy (GGR-COPY-001); MCP filesystem-style tools
     // must not be a quieter path to the same object. Same normalization as
     // every other copy-store lookup (trailing-slash stripped, dir prefix).
+    // 2026-09-05: data provenance only (kind "copy") and the RESOLVED path
+    // participates — symlinks cannot launder identity through MCP either.
     if (!hitPath && opts.knownCopies?.length) {
-      const cn = normCopyToken(value)
-      const hit = cn
-        ? opts.knownCopies.find(
-          (k) =>
-            normCopyToken(k.token ?? "") === cn ||
-            (k.dir && cn.startsWith(normCopyToken(k.token ?? "") + "/"))
-        )
-        : null
+      const cn = provToken(value, opts.resolvePath)
+      const cands = [cn]
+      if (opts.resolvePath) {
+        try {
+          const real = opts.resolvePath(String(value))
+          if (real) cands.push(provToken(real, opts.resolvePath))
+        } catch {}
+      }
+      let hit = null
+      for (const k of opts.knownCopies) {
+        if (k.kind === "ref") continue
+        const kt = provToken(k.token ?? "", opts.resolvePath)
+        if (cands.some((c) => c && (c === kt || (k.dir && c.startsWith(kt + "/"))))) {
+          hit = k
+          break
+        }
+      }
       if (hit) {
         out.push({
           decision: "block",
@@ -3342,7 +3672,17 @@ function scanBodyForProtected(policy, body, copies, promote) {
 
 /** Carrier files carry executable bodies in embedded strings. */
 function looksLikeCarrierScript(path) {
-  return CARRIER_SCRIPT_RE_COMPILED.test(String(path ?? "")) || CARRIER_WORKFLOW_RE.test(String(path ?? ""))
+  // 2026-09-05: VCS hook directories execute their members by LOCATION
+  // (git runs `.git/hooks/pre-commit` on commit regardless of extension or
+  // shebang), so a hook body referencing protected material must ask at
+  // write time — the only choke point, since `git commit` itself carries no
+  // analyzable reference to the hook. Custom `core.hooksPath` directories
+  // stay a documented residual (no static name to key on).
+  return (
+    CARRIER_SCRIPT_RE_COMPILED.test(String(path ?? "")) ||
+    CARRIER_WORKFLOW_RE.test(String(path ?? "")) ||
+    /(^|\/)\.git\/hooks\//.test(String(path ?? ""))
+  )
 }
 
 /**
@@ -3370,20 +3710,56 @@ function contentWriteAllowlisted(policy, path) {
   })
 }
 
+/**
+ * REFERENCE-taint detection for agent-written files (2026-09-05).
+ *
+ * A SILENT write whose content references protected material creates an
+ * object that may later be consumed as program input (renamed makefile,
+ * runner config, response/list file, service definition, git hook). The
+ * object itself is not secret — it may be pure prose — so reading it stays
+ * free; the entry is recorded with kind "ref" and only CONSUMPTION asks
+ * (GGR-REF-001). Writes that already prompted (GGW-CONTENT-*) are
+ * human-approved and deliberately not tainted; denied writes never execute.
+ * Returns a store-note-ready entry {dest, tier, ruleId} or null.
+ */
+export function detectWriteRefTaint(policy, filePath, content) {
+  if (typeof content !== "string" || !content) return null
+  if (contentWriteAllowlisted(policy, filePath)) return null
+  const hits = embeddedProtectedHits(policy, content.slice(0, 131072))
+  if (!hits.length) return null
+  return { dest: normCopyToken(filePath), tier: hits[0].tier, ruleId: hits[0].ruleId }
+}
+
 /** Decide on a normalized tool call. Returns null (no opinion) or a verdict. */
 export function decideToolCall(policy, toolCall, opts = {}) {
   const knownCopies = opts.knownCopies ?? []
+  // DATA provenance only (kind "copy"); kind "ref" objects are consume-gated
+  // by the shell engine (GGR-REF-001), never read-gated — a file that merely
+  // mentions protected material must stay readable.
   const copyLookup = (p) => {
     if (!knownCopies.length || !p) return null
-    const norm = normCopyToken(p)
+    const norm = provToken(p, opts.resolvePath)
     if (!norm) return null
     return (
       knownCopies.find(
         (k) =>
-          normCopyToken(k.token ?? "") === norm ||
-          (k.dir && norm.startsWith(normCopyToken(k.token ?? "") + "/"))
+          k.kind !== "ref" &&
+          (provToken(k.token ?? "", opts.resolvePath) === norm ||
+            (k.dir && norm.startsWith(provToken(k.token ?? "", opts.resolvePath) + "/")))
       ) ?? null
     )
+  }
+  // 2026-09-05: resolve-on-consume for native tools — the literal path AND
+  // its symlink-resolved target both feed the provenance lookup.
+  const pathCandidates = (p) => {
+    const cands = [p]
+    if (typeof opts.resolvePath === "function") {
+      try {
+        const real = opts.resolvePath(p)
+        if (real && real !== p) cands.push(real)
+      } catch {}
+    }
+    return cands
   }
   switch (toolCall.kind) {
     case "shell":
@@ -3394,15 +3770,17 @@ export function decideToolCall(policy, toolCall, opts = {}) {
       // the adapter's after-hook (overwrite clears tracking) so legitimate
       // replacement stays possible.
       if (toolCall.mode === "read") {
-        const hit = copyLookup(toolCall.path)
-        if (hit) {
-          return {
-            decision: hit.tier === "deny" ? "block" : "ask",
-            ruleId: "GGR-COPY-001",
-            category: "semantic-bypass",
-            reason: "read of a temporary copy of protected material",
-            matched: basenameOf(toolCall.path),
-            pathRule: hit.ruleId,
+        for (const cand of pathCandidates(toolCall.path)) {
+          const hit = copyLookup(cand)
+          if (hit) {
+            return {
+              decision: hit.tier === "deny" ? "block" : "ask",
+              ruleId: "GGR-COPY-001",
+              category: "semantic-bypass",
+              reason: "read of a temporary copy of protected material",
+              matched: basenameOf(toolCall.path),
+              pathRule: hit.ruleId,
+            }
           }
         }
       }
@@ -3511,15 +3889,17 @@ export function decideToolCall(policy, toolCall, opts = {}) {
       }
       if (!toolCall.path) return null
       {
-        const hit = copyLookup(toolCall.path)
-        if (hit) {
-          return {
-            decision: hit.tier === "deny" ? "block" : "ask",
-            ruleId: "GGR-COPY-001+GREP",
-            category: "search-bypass",
-            reason: "content search over a temporary copy of protected material",
-            matched: basenameOf(toolCall.path),
-            pathRule: hit.ruleId,
+        for (const cand of pathCandidates(toolCall.path)) {
+          const hit = copyLookup(cand)
+          if (hit) {
+            return {
+              decision: hit.tier === "deny" ? "block" : "ask",
+              ruleId: "GGR-COPY-001+GREP",
+              category: "search-bypass",
+              reason: "content search over a temporary copy of protected material",
+              matched: basenameOf(toolCall.path),
+              pathRule: hit.ruleId,
+            }
           }
         }
       }
@@ -3595,20 +3975,33 @@ export function decidePermissionEvent(policy, action, resources, opts = {}) {
     if (action === "read" || action === "edit") {
       const mode = action === "edit" ? "write" : "read"
       if (mode === "read" && knownCopies.length) {
-        const norm = normCopyToken(res)
-        const hit = knownCopies.find(
-          (k) =>
-            normCopyToken(k.token ?? "") === norm ||
-            (k.dir && norm.startsWith(normCopyToken(k.token ?? "") + "/"))
-        )
-        if (hit) {
-          return {
-            decision: hit.tier === "deny" ? "block" : "ask",
-            ruleId: "GGR-COPY-001",
-            category: "semantic-bypass",
-            reason: "read of a temporary copy of protected material",
-            matched: basenameOf(res),
-            pathRule: hit.ruleId,
+        // 2026-09-05: data provenance only (kind "copy"), and the RESOLVED
+        // path participates — a symlink onto a tracked copy cannot launder
+        // identity through the permission channel either.
+        const cands = [String(res)]
+        if (typeof opts.resolvePath === "function") {
+          try {
+            const real = opts.resolvePath(String(res))
+            if (real && real !== res) cands.push(String(real))
+          } catch {}
+        }
+        for (const cand of cands) {
+          const norm = provToken(cand, opts.resolvePath)
+          const hit = knownCopies.find(
+            (k) =>
+              k.kind !== "ref" &&
+              (provToken(k.token ?? "", opts.resolvePath) === norm ||
+                (k.dir && norm.startsWith(provToken(k.token ?? "", opts.resolvePath) + "/")))
+          )
+          if (hit) {
+            return {
+              decision: hit.tier === "deny" ? "block" : "ask",
+              ruleId: "GGR-COPY-001",
+              category: "semantic-bypass",
+              reason: "read of a temporary copy of protected material",
+              matched: basenameOf(res),
+              pathRule: hit.ruleId,
+            }
           }
         }
       }
@@ -3862,13 +4255,6 @@ export default {
     const pendingSensitive = new Map() // callID -> true (result should be marked)
     const callIdOf = (event) => (event && typeof event.callID === "string" ? event.callID : "")
 
-    // E2 session file-copy provenance (always on, bounded): `cp .env /tmp/x`
-    // in one tool call, `cat /tmp/x` in the next. Same-command tracking lives
-    // in analyzeCommand; this persists it across calls. Populated in
-    // execute.after only (never pre-execution) so denied/unapproved copies
-    // are never recorded; cleared on `rm` and on clean-source overwrite.
-    const copyStore = createCopyProvenanceStore({ maxEntries: 32 })
-
     // F2 (2026-09-04e): bounded file-body reader for executed-file inspection.
     // Sync, capped (32 KiB, regular files only), never throws into hooks.
     const readBody = (p) => {
@@ -3900,6 +4286,18 @@ export default {
         return null
       }
     }
+
+    // E2 session file-copy provenance (always on, bounded): `cp .env /tmp/x`
+    // in one tool call, `cat /tmp/x` in the next. Same-command tracking lives
+    // in analyzeCommand; this persists it across calls. Populated in
+    // execute.after only (never pre-execution) so denied/unapproved copies
+    // are never recorded; cleared on `rm` and on clean-source overwrite.
+    // 2026-09-05: the store also carries kind "ref" entries (reference
+    // provenance from silent agent writes) with partitioned retention —
+    // deny-tier data provenance is not advisory-flushable. Created AFTER
+    // resolvePath: the store canonicalizes tokens through it (2026-09-06).
+    const copyStore = createCopyProvenanceStore({ resolvePath })
+    const pendingRefTaint = new Map() // callID -> {dest, tier, ruleId} (silent writes)
 
     await ctx.tool.hook("execute.before", (event) => {
       const callID = callIdOf(event)
@@ -3964,6 +4362,16 @@ export default {
         writeHeartbeat({ phase: "active", lastDecision: v.ruleId })
         throw new Error(formatVerdict({ ...v, decision: "block" }))
       }
+      // 2026-09-05 taint-on-write: a SILENT write whose content references
+      // protected material becomes a ref-tainted object (consume-gated by
+      // GGR-REF-001 when a later tool call hands it to a program). Writes
+      // that already prompted (GGW-CONTENT-*) are human-approved and are
+      // deliberately not tainted; denied writes never execute. The entry is
+      // noted in execute.after so failed writes leave no state.
+      if (norm.kind === "path" && norm.mode === "write" && !v && callID && typeof norm.content === "string") {
+        const refTaint = detectWriteRefTaint(policy, String(norm.path ?? ""), norm.content)
+        if (refTaint) pendingRefTaint.set(callID, refTaint)
+      }
       // Provenance sources: any approval-gated call whose result will flow
       // (native read/edit asks; MCP asks already marked above).
       if (prov && v && v.decision === "ask" && callID) {
@@ -3994,13 +4402,24 @@ export default {
           const norm = normalizeToolCall(event.tool, input)
           if (norm.kind === "shell") {
             const cmd = String(norm.command ?? "")
-            // Clear on `rm` first so `rm /tmp/x` then reuse starts clean.
-            for (const n of detectCopyClears(cmd, copyStore.entries().map((e) => e.token))) {
+            // 2026-09-05 ordering: compute transfers FIRST from the pre-
+            // command store (an `mv a m` rename must propagate a's taint to
+            // m), THEN apply clears — clearing first would erase the source
+            // the transfer reads. `rm` legs produce no tracks, so rm-clearing
+            // is unaffected.
+            const tracks = detectCopyTracks(policy, cmd, {
+              resolvePath,
+              // 2026-09-05: session-aware sources — a copy/mv/ln whose SOURCE
+              // is already tracked propagates the taint (identity transfer).
+              knownCopies: copyStore.entries(),
+            })
+            // Clear on `rm` (and `mv` sources) so `rm /tmp/x` then reuse
+            // starts clean, and a rename leaves no stale identity.
+            for (const n of detectCopyClears(cmd, copyStore.entries().map((e) => e.token), { resolvePath })) {
               copyStore.remove(n)
             }
-            const tracks = detectCopyTracks(policy, cmd, { resolvePath })
             if (tracks.length) {
-              for (const t of tracks) copyStore.note(t.dest, t.tier, t.ruleId, t.dir)
+              for (const t of tracks) copyStore.note(t.dest, t.tier, t.ruleId, t.dir, t.kind)
             } else {
               // Clean-source overwrite of a tracked dest clears it
               // (`cp notes.txt /tmp/x` replaces the secrets).
@@ -4023,10 +4442,18 @@ export default {
               }
             }
           } else if (norm.kind === "path" && norm.mode === "write") {
-            // Overwriting a tracked copy with new content clears it; the
-            // write itself was already gated above when it referenced
-            // protected material directly.
-            copyStore.remove(String(norm.path ?? ""))
+            const afterCallID = callIdOf(event)
+            const refTaint = afterCallID ? pendingRefTaint.get(afterCallID) : null
+            if (afterCallID) pendingRefTaint.delete(afterCallID)
+            // Full-file writes (write tool) replace content: set or clear the
+            // reference taint. Partial edits (newString fragment) can only
+            // set — a clean fragment cannot prove the rest of the file clean.
+            if (event?.tool === "write") {
+              copyStore.remove(String(norm.path ?? ""))
+              if (refTaint) copyStore.note(refTaint.dest, refTaint.tier, refTaint.ruleId, false, "ref")
+            } else if (refTaint) {
+              copyStore.note(refTaint.dest, refTaint.tier, refTaint.ruleId, false, "ref")
+            }
           }
         } catch {}
       })

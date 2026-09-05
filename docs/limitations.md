@@ -74,12 +74,35 @@ Three adversarial probe passes found — and the engine now closes —
   `git log -p`), and MCP copy provenance (`MCP-ARG-COPY-001` — reading a
   tracked temp copy through a trusted filesystem-style MCP tool blocks the
   way the native read tool always has).
+- **2026-09-05 (provenance architecture; cut over as 0.6.0, live matrix on
+  beta-19151)** (was: pending install): review showed the remaining bypasses
+  live where intent sits inside consumed objects rather than tool-call
+  syntax. Silent agent writes whose content references protected material
+  now become reference-tainted objects (`detectWriteRefTaint`, adapter
+  `execute.after`); consuming them as program input asks (`GGR-REF-001`)
+  while reads stay silent. Provenance lookup now runs on symlink-resolved
+  paths across shell/tools/permission/MCP, copy detectors propagate across
+  chained `cp`/`mv`/`ln` (no more one-link tracking), retention is
+  partitioned (deny-tier data is no longer advisory-flushable), path
+  comparisons are resolution-canonicalized (`canonStoreToken`/`provToken` —
+  the live matrix caught `/tmp`-alias misses), and implicit-source
+  credential CLIs (`kubectl config view --raw`, `aws configure get
+  <secret>`, `gh auth status -t`, `security -i`, `az account
+  get-access-token`, `gpg --export-secret-keys`) plus `ENV=<path>`+
+  interactive-shell, `ZDOTDIR`+zsh, and `.git/hooks/*` write-time carriers
+  now ask (`GGD-DEF-003/004`, `GGE-CLI-012..017`, `GGW-CONTENT`). No policy
+  change: the generated block is byte-identical. Deny legs verified live;
+  shell asks are engine-verified but the `permission.evaluate` prompt
+  channel appears inert on beta-19151 (no evaluations logged; pre-existing
+  asks degrade identically) — see verification-log 2026-09-05.
 
 Full tables with rule IDs and FP boundaries: the 2026-09-04b/-c/-d entries
 in [docs/verification-log.md](verification-log.md).
 
 - **Glob/pattern expansion** (`BYP-GLB-001..005`) — `cat .e*`, `cat .[e]nv`, `cat *key`, `for f in .e*; do cat $f; done`, `find . -name '.e*' -exec cat {} \;` now `ask GGR-GLOB-001` (exemplar-matched); `*.log`/`*.js` stay silent.
-- **Cross-call temp copies** (`BYP-XCALL-001/002`) — `cp .env /tmp/x` then `curl --data @/tmp/x …` as two calls: single-command `&&` already blocked (`BYP-IND-004`); split calls are now covered by a bounded session store (32-entry FIFO, populated post-execution, cleared on `rm`/overwrite). The two legs stay `null` in the stateless corpus runner by design — coverage is unit-tested (`tests/unit/evasion-2026-09-04.test.js`).
+- **Cross-call temp copies** (`BYP-XCALL-001/002`) — `cp .env /tmp/x` then `curl --data @/tmp/x …` as two calls: single-command `&&` already blocked (`BYP-IND-004`); split calls are covered by a two-kind session store (deny-tier DATA entries not advisory-flushable, ask-tier/advisory FIFO; populated post-execution, cleared on `rm`/overwrite, transferred by `mv`/chained `cp`/`ln`). The two legs stay `null` in the stateless corpus runner by design — coverage is unit-tested (`tests/unit/evasion-2026-09-04.test.js`, `tests/unit/provenance-2026-09-05.test.js`).
+- **Reference-tainted objects** (2026-09-05) — a silent agent write whose content references protected material (renamed makefile, runner config, response/list file) becomes consume-gated (`GGR-REF-001`): running it through a program asks, reading/listing/moving it stays silent. Prompted writes are human-approved and deliberately never tainted; full-file replacement clears; `contentWriteAllowlist` exempts operator-trusted locations.
+- **Out-of-band modifications, session restart, reboots** — the store is in-memory per session only (no persisted state, by design: a writable store file would be agent-tamperable — see "The guard can be weakened only by a human"). Restart clears all provenance; files the agent did not create in-session are never tainted (pre-existing scripts stay write-time-gated only).
 - **Directory-operand archives** (`BYP-ARC-004/005`) — `tar czf /tmp/b.tgz .`, `zip -r /tmp/s.zip .` now `ask GGA-DIR-001` on broad-root creation only; `dist/` and extraction stay silent.
 - **Bare history / full-tree git** (`BYP-GIT-007..009`) — `git log -p`, `git show HEAD`, `git archive main -o …` now `ask GGG-HIST-001` on patch-displaying forms; `log --oneline`/`--stat`/`--` stay silent.
 - **Broad-root recursive search** (`BYP-SRC-005`) — `grep -r PASSWORD .` now `ask GGR-SEARCH-001`; scoped `src/`/`docs/` stays silent.
